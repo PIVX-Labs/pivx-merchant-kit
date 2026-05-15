@@ -123,7 +123,7 @@ async fn broadcast_one(
     // swept the address manually, or the explorer's view may have
     // changed (reorg).
     let raw = explorer.utxos_for_address(&invoice.address).await?;
-    let utxos = parse_blockbook_utxos(&raw);
+    let utxos = dedupe_utxos(parse_blockbook_utxos(&raw));
     if utxos.is_empty() {
         return Err(Error::Invoice(format!(
             "no UTXOs at invoice address {} — already swept?",
@@ -199,6 +199,20 @@ async fn broadcast_one(
         "refund broadcast"
     );
     Ok(())
+}
+
+/// Dedupe UTXOs by `(txid, vout)`. Blockbook can briefly return the same
+/// output twice during indexing — once with `confirmations: 0` (mempool
+/// view) and once with the real height — and `parse_blockbook_utxos`
+/// doesn't dedupe. Handing both copies to the tx builder produces a
+/// `bad-txns-inputs-duplicate` rejection from the node. Keep the first
+/// occurrence (insertion order) so the result is stable.
+fn dedupe_utxos(utxos: Vec<pivx_wallet_kit::wallet::SerializedUTXO>) -> Vec<pivx_wallet_kit::wallet::SerializedUTXO> {
+    let mut seen = std::collections::HashSet::new();
+    utxos
+        .into_iter()
+        .filter(|u| seen.insert((u.txid.clone(), u.vout)))
+        .collect()
 }
 
 fn unix_now() -> i64 {
