@@ -10,4 +10,5 @@ pub mod error;
 pub mod invoice;
 pub mod payment;
 pub mod storage;
+pub mod sync;
 pub mod wallet;

@@ -35,6 +35,11 @@ zeroize = { version = "1.8", features = ["derive"] }
 bip39 = "2"
 rand_core = { version = "0.6", features = ["std"] }
 
+# HTTP client for Blockbook + PIVX Core RPC. `rustls-tls` avoids the
+# OpenSSL platform dance and keeps us consistent with sqlx's TLS backend.
+# `gzip` because explorer responses for invoice-heavy wallets can be large.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+
 # Secure passphrase reading: no echo on tty, plain line read from pipe.
 rpassword = "7"
 

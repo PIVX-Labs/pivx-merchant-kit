@@ -23,6 +23,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::storage::Db;
+use crate::sync::{self, SyncState};
 use crate::wallet::{unlock, Wallet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -221,7 +222,7 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
     tracing::info!("wallet decrypted");
 
     let db_path = std::path::Path::new(&cfg.wallet.data_dir).join("merchant.db");
-    let _db = Db::open(&db_path).await?;
+    let db = Db::open(&db_path).await?;
     tracing::info!(path = %db_path.display(), "database ready");
 
     // Loud warning if zero-conf is configured.
@@ -238,8 +239,21 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
 
     tracing::info!(
         address = %wallet.inner.get_transparent_address().unwrap_or_else(|_| "<unavailable>".into()),
-        "daemon ready (sync + API land in Stages 3b/5)"
+        last_block = wallet.inner.last_block,
+        "wallet ready"
     );
+
+    let state = SyncState::new(db, wallet, wallet_path, unlock_key, cfg)?;
+    let sync_task = tokio::spawn(sync::run(state));
+
+    tracing::info!("daemon running — API server and matcher land in Stages 5/4");
+
+    // For Stage 3b, the daemon stays up while the sync loop runs. SIGINT
+    // handling lands in Stage 8; for now Ctrl-C terminates the process,
+    // sync loop never returns voluntarily (it's a loop {}).
+    tokio::signal::ctrl_c().await.ok();
+    tracing::info!("shutdown signal received, exiting");
+    sync_task.abort();
     Ok(())
 }
 
