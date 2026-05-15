@@ -1,0 +1,47 @@
+# NOTE: Cargo.lock is intentionally committed. `core2 = 0.3.x` is yanked from
+# crates.io and is a transitive dep of librustpivx — building from a fresh
+# resolver without the lock would fail. Drop the lock once librustpivx
+# releases a build that doesn't pull yanked core2.
+[package]
+name = "pivx-merchant-kit"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted PIVX payment processor — accept transparent and shield payments with webhooks, partial-payment handling, and refunds. No middlemen, no fees."
+repository = "https://github.com/PIVX-Labs/pivx-merchant-kit"
+license = "MIT"
+
+[[bin]]
+name = "pivx-merchant-kit"
+path = "src/main.rs"
+
+[dependencies]
+# Shared PIVX wallet core. Pinned to a release tag for reproducible builds;
+# bump when a new wallet-kit feature is needed.
+pivx-wallet-kit = { git = "https://github.com/PIVX-Labs/pivx-wallet-kit", tag = "v0.2.0" }
+
+# Async runtime — daemon needs concurrent sync loop, HTTP server, and webhook
+# delivery workers. `rt-multi-thread` enables work-stealing across cores.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "io-util", "net"] }
+
+# Errors / logging — picked early so every stage uses the same stack.
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization (config + JSON API payloads — `serde` is already pulled by
+# wallet-kit, but keeping the dep explicit here so the manifest stands alone).
+serde = { version = "1", features = ["derive"] }
+
+# Inherit the same transitive-dep pins as wallet-kit / agent-kit. Without these,
+# the orchard/redjubjub deps pulled in by librustpivx won't resolve.
+[patch.crates-io]
+orchard = { git = "https://github.com/zcash/orchard.git", rev = "c684e9185a0449efb00428f807d3bf286b5dae03" }
+redjubjub = { git = "https://github.com/ZcashFoundation/redjubjub", rev = "eae848c5c14d9c795d000dd9f4c4762d1aee7ee1" }
+bellman = { git = "https://github.com/Duddino/librustpivx", branch = "librustzcash-rebase" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
