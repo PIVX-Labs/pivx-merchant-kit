@@ -133,6 +133,7 @@ mod tests {
             channel: PaymentChannel::Transparent,
             amount_due_sat: 1_000_000,
             address: addr.into(),
+            hd_index: 0,
             status: InvoiceStatus::Pending,
             created_at: 1_700_000_000,
             expires_at: 1_700_001_800,

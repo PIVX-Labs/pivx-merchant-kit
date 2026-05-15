@@ -27,7 +27,7 @@ pub async fn insert(db: &Db, invoice: &Invoice) -> Result<()> {
     .bind(invoice.channel.as_str())
     .bind(amount_due)
     .bind(&invoice.address)
-    .bind(0_i64) // hd_index — Stage 3 wires this through; placeholder for now
+    .bind(invoice.hd_index as i64)
     .bind(invoice.status.as_str())
     .bind(invoice.refund_address.as_deref())
     .bind(metadata)
@@ -40,7 +40,7 @@ pub async fn insert(db: &Db, invoice: &Invoice) -> Result<()> {
 
 pub async fn get(db: &Db, id: Uuid) -> Result<Option<Invoice>> {
     let row = sqlx::query(
-        "SELECT id, external_id, channel, amount_due_sat, address, status,
+        "SELECT id, external_id, channel, amount_due_sat, address, hd_index, status,
                 refund_address, metadata, created_at, expires_at
            FROM invoices
           WHERE id = ?",
@@ -53,7 +53,7 @@ pub async fn get(db: &Db, id: Uuid) -> Result<Option<Invoice>> {
 
 pub async fn get_by_external_id(db: &Db, external_id: &str) -> Result<Option<Invoice>> {
     let row = sqlx::query(
-        "SELECT id, external_id, channel, amount_due_sat, address, status,
+        "SELECT id, external_id, channel, amount_due_sat, address, hd_index, status,
                 refund_address, metadata, created_at, expires_at
            FROM invoices
           WHERE external_id = ?",
@@ -66,7 +66,7 @@ pub async fn get_by_external_id(db: &Db, external_id: &str) -> Result<Option<Inv
 
 pub async fn get_by_address(db: &Db, address: &str) -> Result<Option<Invoice>> {
     let row = sqlx::query(
-        "SELECT id, external_id, channel, amount_due_sat, address, status,
+        "SELECT id, external_id, channel, amount_due_sat, address, hd_index, status,
                 refund_address, metadata, created_at, expires_at
            FROM invoices
           WHERE address = ?",
@@ -108,7 +108,7 @@ pub async fn list(db: &Db, filter: InvoiceFilter) -> Result<Vec<Invoice>> {
     let rows = match filter.status {
         Some(s) => {
             sqlx::query(
-                "SELECT id, external_id, channel, amount_due_sat, address, status,
+                "SELECT id, external_id, channel, amount_due_sat, address, hd_index, status,
                         refund_address, metadata, created_at, expires_at
                    FROM invoices
                   WHERE status = ?
@@ -122,7 +122,7 @@ pub async fn list(db: &Db, filter: InvoiceFilter) -> Result<Vec<Invoice>> {
         }
         None => {
             sqlx::query(
-                "SELECT id, external_id, channel, amount_due_sat, address, status,
+                "SELECT id, external_id, channel, amount_due_sat, address, hd_index, status,
                         refund_address, metadata, created_at, expires_at
                    FROM invoices
                ORDER BY created_at DESC
@@ -140,7 +140,7 @@ pub async fn list(db: &Db, filter: InvoiceFilter) -> Result<Vec<Invoice>> {
 /// Returns non-terminal invoices whose `expires_at <= now`.
 pub async fn list_expirable(db: &Db, now: i64) -> Result<Vec<Invoice>> {
     let rows = sqlx::query(
-        "SELECT id, external_id, channel, amount_due_sat, address, status,
+        "SELECT id, external_id, channel, amount_due_sat, address, hd_index, status,
                 refund_address, metadata, created_at, expires_at
            FROM invoices
           WHERE expires_at <= ?
@@ -157,6 +157,7 @@ fn row_to_invoice(row: sqlx::sqlite::SqliteRow) -> Result<Invoice> {
     let channel_str: String = row.try_get("channel")?;
     let status_str: String = row.try_get("status")?;
     let amount_due: i64 = row.try_get("amount_due_sat")?;
+    let hd_index: i64 = row.try_get("hd_index")?;
     let metadata_str: String = row.try_get("metadata")?;
     Ok(Invoice {
         id: Uuid::parse_str(&id_str)
@@ -166,6 +167,8 @@ fn row_to_invoice(row: sqlx::sqlite::SqliteRow) -> Result<Invoice> {
         amount_due_sat: u64::try_from(amount_due)
             .map_err(|_| Error::Parse("negative amount_due_sat".into()))?,
         address: row.try_get("address")?,
+        hd_index: u32::try_from(hd_index)
+            .map_err(|_| Error::Parse("hd_index out of u32 range".into()))?,
         status: InvoiceStatus::from_str(&status_str)?,
         refund_address: row.try_get("refund_address")?,
         metadata: serde_json::from_str(&metadata_str)?,
@@ -186,6 +189,7 @@ mod tests {
             channel: PaymentChannel::Transparent,
             amount_due_sat: 100_000_000, // 1 PIV
             address: addr.into(),
+            hd_index: 0,
             status: InvoiceStatus::Pending,
             created_at: 1_700_000_000,
             expires_at: 1_700_001_800,

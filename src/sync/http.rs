@@ -164,6 +164,53 @@ impl RpcClient {
         }
         Ok(bytes.to_vec())
     }
+
+    /// Broadcast a raw transaction (hex-encoded). Returns the txid on
+    /// success. The PIVX Core JSON-RPC endpoint for this is the standard
+    /// `sendrawtransaction` method, invoked over HTTP POST.
+    ///
+    /// Failures fall into two buckets: transport (network, 5xx) and
+    /// protocol (RPC method returned an error, e.g. tx rejected by
+    /// mempool). Both surface as `Error::Config` with a descriptive
+    /// message — the caller's retry policy decides how to handle each.
+    pub async fn send_raw_transaction(&self, txhex: &str) -> Result<String> {
+        let body = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "merchant-kit",
+            "method": "sendrawtransaction",
+            "params": [txhex],
+        });
+        let resp = self
+            .http
+            .post(&self.base)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Config(format!("rpc POST sendrawtransaction: {}", e)))?;
+        let status = resp.status();
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Config(format!("rpc response parse: {}", e)))?;
+        if !status.is_success() {
+            return Err(Error::Config(format!(
+                "rpc sendrawtransaction HTTP {}: {}",
+                status, json
+            )));
+        }
+        if let Some(err) = json.get("error").filter(|v| !v.is_null()) {
+            return Err(Error::Config(format!("rpc sendrawtransaction: {}", err)));
+        }
+        json.get("result")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "rpc sendrawtransaction missing result field: {}",
+                    json
+                ))
+            })
+    }
 }
 
 #[cfg(test)]

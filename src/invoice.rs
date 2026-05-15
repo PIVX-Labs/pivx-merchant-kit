@@ -118,6 +118,12 @@ pub struct Invoice {
     /// from the merchant wallet's HD chain (one address per invoice keeps
     /// the matcher simple and on-chain analysis harder).
     pub address: String,
+    /// HD slot that derives this invoice's address. Used by the refund
+    /// builder to re-derive the spending key — without this, we'd need
+    /// to scan the HD tree on every refund. Not serialised in API
+    /// responses (internal detail, no value to merchant code).
+    #[serde(default, skip_serializing)]
+    pub hd_index: u32,
     pub status: InvoiceStatus,
     pub created_at: i64,
     /// Mutable. Set initially to `created_at + default_expiry_secs`. Partial

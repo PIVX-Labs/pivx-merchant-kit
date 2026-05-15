@@ -164,6 +164,7 @@ mod tests {
             channel: PaymentChannel::Transparent,
             amount_due_sat: 1000,
             address: format!("Daddr-{}", invoice_id),
+            hd_index: 0,
             status: InvoiceStatus::Confirmed,
             created_at: 1,
             expires_at: 2,

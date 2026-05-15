@@ -247,6 +247,7 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
     let state = SyncState::new(db, wallet, wallet_path.clone(), unlock_key, cfg)?;
     let sync_task = tokio::spawn(sync::run(state.clone()));
     let webhook_task = tokio::spawn(crate::webhooks::run(state.clone()));
+    let refund_task = tokio::spawn(crate::refunds::worker::run(state.clone()));
 
     // HTTP control plane.
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -277,7 +278,7 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
     // Drain the three workers. axum's graceful_shutdown will finish any
     // in-flight requests; sync + webhook loops break out at their next
     // sleep boundary.
-    let _ = tokio::join!(sync_task, webhook_task, api_task);
+    let _ = tokio::join!(sync_task, webhook_task, api_task, refund_task);
 
     // Final wallet save catches any progress between the last automatic
     // writeback and the shutdown signal. Failing here is rare and not

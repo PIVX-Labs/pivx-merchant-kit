@@ -23,6 +23,7 @@
 //! keep their funds with the merchant.
 
 pub mod queue;
+pub mod worker;
 
 use crate::config::PaymentsConfig;
 use crate::error::Result;
@@ -211,6 +212,7 @@ mod tests {
             channel: PaymentChannel::Transparent,
             amount_due_sat: amount_due,
             address: format!("Addr-{}", Uuid::new_v4()),
+            hd_index: 0,
             status,
             created_at: 0,
             expires_at: 0,

@@ -125,6 +125,7 @@ mod tests {
             channel: PaymentChannel::Transparent,
             amount_due_sat: 100_000_000,
             address: addr.into(),
+            hd_index: 0,
             status,
             created_at: 1,
             expires_at: 9999,

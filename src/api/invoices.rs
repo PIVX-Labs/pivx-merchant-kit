@@ -77,6 +77,7 @@ pub async fn create(
         channel: req.channel,
         amount_due_sat: req.amount_due_sat,
         address: derived.address,
+        hd_index: derived.hd_index,
         status: InvoiceStatus::Pending,
         created_at: now,
         expires_at: now + expiry_secs as i64,

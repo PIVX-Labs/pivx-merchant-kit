@@ -128,6 +128,7 @@ mod tests {
             channel: PaymentChannel::Shield,
             amount_due_sat: 1000,
             address: "ps1qreal_invoice_address".into(),
+            hd_index: 0,
             status: InvoiceStatus::Pending,
             created_at: 0,
             expires_at: 100,
