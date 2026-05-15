@@ -32,6 +32,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Serialization (config + JSON API payloads — `serde` is already pulled by
 # wallet-kit, but keeping the dep explicit here so the manifest stands alone).
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Invoice IDs — UUID v4 keeps them globally unique and unguessable, which
+# matters because the invoice ID is used as the public payment reference.
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Inherit the same transitive-dep pins as wallet-kit / agent-kit. Without these,
 # the orchard/redjubjub deps pulled in by librustpivx won't resolve.
