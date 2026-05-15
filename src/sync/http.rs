@@ -166,50 +166,61 @@ impl RpcClient {
     }
 
     /// Broadcast a raw transaction (hex-encoded). Returns the txid on
-    /// success. The PIVX Core JSON-RPC endpoint for this is the standard
-    /// `sendrawtransaction` method, invoked over HTTP POST.
+    /// success.
     ///
-    /// Failures fall into two buckets: transport (network, 5xx) and
-    /// protocol (RPC method returned an error, e.g. tx rejected by
-    /// mempool). Both surface as `Error::Config` with a descriptive
-    /// message — the caller's retry policy decides how to handle each.
+    /// The public PIVX RPC shim at `rpc.pivxla.bz` uses path-based
+    /// routing rather than standard JSON-RPC: POST the raw hex to
+    /// `/sendrawtransaction` (text/plain body) and get back either the
+    /// txid as plain text on success or an error message like
+    /// "TX decode failed" / "non-canonical" / etc on failure. The same
+    /// convention is used for `/getblockcount` and `/getshielddata`,
+    /// keeping the API surface consistent.
+    ///
+    /// Distinguishing success from failure: a valid PIVX txid is
+    /// exactly 64 lowercase hex characters. Anything else is treated
+    /// as an error message and surfaced verbatim.
     pub async fn send_raw_transaction(&self, txhex: &str) -> Result<String> {
-        let body = serde_json::json!({
-            "jsonrpc": "1.0",
-            "id": "merchant-kit",
-            "method": "sendrawtransaction",
-            "params": [txhex],
-        });
+        // Trim any trailing /<rpc-method-name> that some operators put
+        // on the configured base URL — historically rpc.pivxla.bz was
+        // hit as `<base>/mainnet`, which is now interpreted by the shim
+        // as the RPC method name. Trim it off so /sendrawtransaction
+        // resolves to a real path.
+        let endpoint = format!(
+            "{}/sendrawtransaction",
+            self.base.trim_end_matches('/').trim_end_matches("/mainnet")
+        );
         let resp = self
             .http
-            .post(&self.base)
-            .json(&body)
+            .post(&endpoint)
+            .header("content-type", "text/plain")
+            .body(txhex.to_string())
             .send()
             .await
-            .map_err(|e| Error::Config(format!("rpc POST sendrawtransaction: {}", e)))?;
+            .map_err(|e| Error::Config(format!("rpc POST {}: {}", endpoint, e)))?;
         let status = resp.status();
-        let json: serde_json::Value = resp
-            .json()
+        let body = resp
+            .text()
             .await
-            .map_err(|e| Error::Config(format!("rpc response parse: {}", e)))?;
+            .map_err(|e| Error::Config(format!("rpc body read: {}", e)))?;
+        let trimmed = body.trim().to_string();
         if !status.is_success() {
             return Err(Error::Config(format!(
                 "rpc sendrawtransaction HTTP {}: {}",
-                status, json
+                status, trimmed
             )));
         }
-        if let Some(err) = json.get("error").filter(|v| !v.is_null()) {
-            return Err(Error::Config(format!("rpc sendrawtransaction: {}", err)));
+        if trimmed.len() == 64
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            Ok(trimmed)
+        } else {
+            Err(Error::Config(format!(
+                "rpc sendrawtransaction rejected: {}",
+                trimmed
+            )))
         }
-        json.get("result")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .ok_or_else(|| {
-                Error::Config(format!(
-                    "rpc sendrawtransaction missing result field: {}",
-                    json
-                ))
-            })
     }
 }
 

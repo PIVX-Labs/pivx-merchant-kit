@@ -30,18 +30,24 @@ use crate::error::Result;
 use crate::invoice::Invoice;
 use crate::storage::{invoices, payments, Db};
 
-/// Fee deducted from refund amounts. Hardcoded for now — wallet-kit's
-/// fee estimator (`fees::estimate_transparent_*`) lands here in a
-/// follow-up once we have the full builder integration. 10000 sat
-/// (= 0.0001 PIV) is comfortably above the protocol minimum for the
-/// small txes refunds produce.
-const REFUND_FEE_SAT: u64 = 10_000;
+/// Pessimistic input count when we can't yet measure the on-chain UTXO
+/// set. Most refunds spend a single UTXO; the worker re-estimates with
+/// the true count at broadcast time and updates the row, so this is
+/// just the initial estimate the API surfaces while the row is pending.
+const ENQUEUE_INPUT_COUNT_ESTIMATE: usize = 1;
 
-/// If the refund amount after fee deduction would be at or below this
-/// threshold, skip the refund entirely — it's not worth the on-chain
-/// fee to send dust. The operator can still see the never-issued
-/// refund attempt in the logs.
-const REFUND_DUST_THRESHOLD_SAT: u64 = REFUND_FEE_SAT;
+/// Estimate the network fee for a refund tx with the given input count.
+///
+/// We mirror wallet-kit's `create_raw_transparent_transaction_from_utxos`
+/// fee math exactly: output count = 2 (the customer plus a potential
+/// change-back-to-source). The builder uses this same formula
+/// internally, so if we pass it `amount = total - estimate_fee(...)`
+/// the implied change comes out to zero and the on-chain tx becomes
+/// 1-output (the builder writes only the recipient and skips the empty
+/// change output).
+pub(crate) fn estimate_fee(input_count: usize) -> u64 {
+    pivx_wallet_kit::fees::estimate_raw_transparent_fee(input_count, 2)
+}
 
 /// Why a refund was created. Persisted on the row so support can tell
 /// at a glance whether the customer's expecting a "you didn't pay
@@ -139,18 +145,19 @@ async fn enqueue(
     gross_sat: u64,
     reason: RefundReason,
 ) -> Result<()> {
+    let fee_estimate = estimate_fee(ENQUEUE_INPUT_COUNT_ESTIMATE);
     // Skip if the refund would be dust after fee deduction.
-    if gross_sat <= REFUND_DUST_THRESHOLD_SAT {
+    if gross_sat <= fee_estimate {
         tracing::info!(
             invoice_id = %invoice.id,
             gross_sat = gross_sat,
-            fee_sat = REFUND_FEE_SAT,
+            fee_sat = fee_estimate,
             reason = %reason.as_str(),
             "refund skipped — net amount would be dust"
         );
         return Ok(());
     }
-    let net_sat = gross_sat - REFUND_FEE_SAT;
+    let net_sat = gross_sat - fee_estimate;
     queue::insert(
         db,
         queue::NewRefund {
@@ -158,7 +165,7 @@ async fn enqueue(
             reason,
             to_address: to_address.into(),
             amount_sat: net_sat,
-            fee_sat: REFUND_FEE_SAT,
+            fee_sat: fee_estimate,
         },
     )
     .await?;
@@ -166,18 +173,12 @@ async fn enqueue(
         invoice_id = %invoice.id,
         to_address = %to_address,
         amount_sat = net_sat,
-        fee_sat = REFUND_FEE_SAT,
+        fee_sat = fee_estimate,
         reason = %reason.as_str(),
-        "refund enqueued (broadcast layer lands in Stage 7b — operator can \
-         send manually via pivx-agent-kit until then)"
+        "refund enqueued — broadcast worker will refine fee and send shortly"
     );
-    // Re-fetch and re-emit a webhook so the merchant gets notified
-    // that this invoice has a refund obligation. Wrapping in a separate
-    // event_type ("invoice.refund_created") would be nicer; for the
-    // initial cut we lean on the invoice.expired / invoice.confirmed
-    // event the matcher already emits and let the merchant correlate
-    // via the refunds API.
-    let _ = invoices::get(db, invoice.id).await; // touch invoice to ensure it still exists
+    // Touch invoice for FK sanity (no-op read).
+    let _ = invoices::get(db, invoice.id).await;
     Ok(())
 }
 
@@ -246,8 +247,8 @@ mod tests {
         let refunds = queue::list_for_invoice(&db, inv.id).await.unwrap();
         assert_eq!(refunds.len(), 1);
         assert_eq!(refunds[0].to_address, "DRefundAddr");
-        assert_eq!(refunds[0].amount_sat, 400_000 - REFUND_FEE_SAT);
-        assert_eq!(refunds[0].fee_sat, REFUND_FEE_SAT);
+        assert_eq!(refunds[0].amount_sat, 400_000 - estimate_fee(ENQUEUE_INPUT_COUNT_ESTIMATE));
+        assert_eq!(refunds[0].fee_sat, estimate_fee(ENQUEUE_INPUT_COUNT_ESTIMATE));
         assert_eq!(refunds[0].reason, "partial_expired");
     }
 
@@ -287,12 +288,14 @@ mod tests {
 
     #[tokio::test]
     async fn dust_refund_is_skipped() {
-        // Paid 5000, fee is 10000 → net would be negative. Skip.
+        // Paid 1000 sat — below the ~2260 sat fee estimate for a
+        // 1-input, 2-output tx. Refunding it would cost more in fees
+        // than the customer receives, so the worker skips it.
         let db = Db::open_memory().await.unwrap();
         let inv = seed_invoice_with_payment(
             &db,
             100_000,
-            5_000,
+            1_000,
             0,
             InvoiceStatus::Expired,
             Some("DRefundAddr"),
@@ -340,7 +343,7 @@ mod tests {
         let refunds = queue::list_for_invoice(&db, inv.id).await.unwrap();
         assert_eq!(refunds.len(), 1);
         // 500000 excess minus fee.
-        assert_eq!(refunds[0].amount_sat, 500_000 - REFUND_FEE_SAT);
+        assert_eq!(refunds[0].amount_sat, 500_000 - estimate_fee(ENQUEUE_INPUT_COUNT_ESTIMATE));
         assert_eq!(refunds[0].reason, "overpayment");
     }
 

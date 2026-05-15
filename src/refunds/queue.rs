@@ -95,10 +95,26 @@ pub async fn list_for_invoice(db: &Db, invoice_id: Uuid) -> Result<Vec<Refund>> 
     rows.into_iter().map(row_to_refund).collect()
 }
 
-/// Operator manually marks a refund broadcast (since auto-broadcast is
-/// Stage 7b). Provided for the operator workflow: build refund tx in
-/// their wallet, broadcast, paste the txid here so the merchant-kit
-/// record matches reality.
+/// Adjust the recorded amount + fee on a pending refund. Called by the
+/// broadcast worker once it has fetched real UTXOs and computed the
+/// actual network fee — keeps the persisted row truthful instead of
+/// stuck with the enqueue-time estimate.
+pub async fn update_amount_and_fee(
+    db: &Db,
+    id: Uuid,
+    amount_sat: u64,
+    fee_sat: u64,
+) -> Result<()> {
+    sqlx::query("UPDATE refunds SET amount_sat = ?, fee_sat = ? WHERE id = ?")
+        .bind(i64::try_from(amount_sat).unwrap_or(i64::MAX))
+        .bind(i64::try_from(fee_sat).unwrap_or(i64::MAX))
+        .bind(id.to_string())
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// Mark a refund broadcast with its on-chain txid.
 pub async fn mark_broadcast(db: &Db, id: Uuid, txid: &str, now: i64) -> Result<()> {
     sqlx::query(
         "UPDATE refunds

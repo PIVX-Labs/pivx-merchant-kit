@@ -131,6 +131,42 @@ async fn broadcast_one(
         )));
     }
 
+    // Refine the fee + refund amount now that we know the real UTXO
+    // set. Enqueue had to guess (1 input default); the truth might be
+    // bigger and the per-byte fee math changes accordingly. Keep the
+    // gross refund amount invariant (the customer's expectation —
+    // what they paid for the partial case, the excess for overpay)
+    // and let the fee absorb the recalculation.
+    //
+    // gross = refund.amount_sat + refund.fee_sat (what we conceptually
+    // owed the customer pre-fee). For partial-expired this equals the
+    // customer's actual payment; for overpay it equals the excess.
+    let gross_sat = refund.amount_sat + refund.fee_sat;
+    let exact_fee = crate::refunds::estimate_fee(utxos.len());
+    if gross_sat <= exact_fee {
+        // Recomputed fee makes this a dust refund — skip + clean up.
+        tracing::info!(
+            refund_id = %refund.id,
+            gross_sat = gross_sat,
+            exact_fee = exact_fee,
+            utxos = utxos.len(),
+            "refund became dust after fee refinement; marking dead"
+        );
+        return Ok(());
+    }
+    let exact_amount = gross_sat - exact_fee;
+    if exact_amount != refund.amount_sat || exact_fee != refund.fee_sat {
+        queue::update_amount_and_fee(db, refund.id, exact_amount, exact_fee).await?;
+        tracing::debug!(
+            refund_id = %refund.id,
+            old_amount = refund.amount_sat,
+            new_amount = exact_amount,
+            old_fee = refund.fee_sat,
+            new_fee = exact_fee,
+            "refund amount/fee refined from actual UTXO count"
+        );
+    }
+
     // Build and sign. The wallet holds the seed; we drop the lock as
     // soon as we have the bip39 seed bytes so other tasks aren't
     // blocked on the broadcast.
@@ -143,7 +179,7 @@ async fn broadcast_one(
             invoice.hd_index,
             &utxos,
             &refund.to_address,
-            refund.amount_sat,
+            exact_amount,
         )
         .map_err(|e| Error::Invoice(format!("refund tx build failed: {}", e)))?;
         result.txhex
@@ -157,7 +193,8 @@ async fn broadcast_one(
         refund_id = %refund.id,
         invoice_id = %invoice.id,
         to = %refund.to_address,
-        amount_sat = refund.amount_sat,
+        amount_sat = exact_amount,
+        fee_sat = exact_fee,
         txid = %txid,
         "refund broadcast"
     );
