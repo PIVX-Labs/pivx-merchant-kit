@@ -1,0 +1,88 @@
+# pivx-merchant-kit config — copy to `config.toml` and edit.
+
+[network]
+# Only "mainnet" is supported today. Testnet support is planned.
+name = "mainnet"
+
+[wallet]
+# Directory the daemon owns. Encrypted wallet, SQLite DB, and HD cursor
+# all live here. Created on first `init` if missing.
+data_dir = "./data"
+
+[sync]
+# PIVX Core RPC exposing the compact-stream API (used by wallet-kit for
+# shield sync). The public node at rpc.pivxla.bz is fine; you can also
+# run your own.
+rpc_url = "https://rpc.pivxla.bz/mainnet"
+
+# Blockbook explorer used for transparent UTXO discovery. Can be the
+# same host as `rpc_url` if you run a combined node.
+explorer_url = "https://explorer.pivxla.bz"
+
+# How often the daemon polls the chain. Default 30s — snappy enough for
+# most flows without hammering public infrastructure.
+poll_interval_secs = 30
+
+[payments]
+# Which channels the API will accept invoice creation for.
+# "transparent" | "shield" | "both"
+accept = "both"
+
+# Confirmations required before the webhook fires.
+#  - 3 is the safe default for most flows.
+#  - 0 enables zero-conf (microtransactions only — DO NOT use for
+#    anything you can't lose if double-spent). The daemon logs a
+#    loud warning on startup if you set this.
+confirmations = 3
+
+# Default expiry for newly-created invoices (override per-invoice via
+# the API's `expires_in_secs` field). 1800 = 30 minutes.
+default_expiry_secs = 1800
+
+# When a partial payment is observed, reset the invoice's expiry to
+# `now + partial_reset_secs` so the customer has a fresh window to
+# top up. Reset (not extend) keeps the customer experience predictable.
+partial_reset_secs = 1800
+
+[refunds]
+# When enabled, the daemon automatically creates refund records for:
+#   - partial-paid invoices that expire before reaching the full amount
+#   - overpaid invoices (excess refunded, fee deducted)
+#
+# When this is true, every invoice MUST include a `refund_address` —
+# the API rejects requests without one.
+#
+# Default false: overpayments become donations, partial-expired invoices
+# keep their funds with the merchant.
+enabled = false
+
+[api]
+# Local-only by default. Front this with a TLS-terminating reverse
+# proxy (nginx, caddy, traefik) if your backend lives on a different
+# host than the daemon.
+bind = "127.0.0.1:7474"
+
+# Bearer token your backend presents in `Authorization: Bearer ...`.
+# Generate fresh per deployment — the daemon refuses to start if this
+# is the literal string "REPLACE_ME" or empty.
+auth_token = "REPLACE_ME"
+
+[webhooks]
+# Where to POST events. The daemon retries with exponential backoff
+# if delivery fails.
+url = "https://your-backend.example.com/pivx-webhook"
+
+# HMAC-SHA256 secret for signing bodies. The daemon adds the digest
+# to the `X-Merchant-Signature` header. Verify on your side to be
+# sure a webhook genuinely came from this daemon.
+#
+# OPTIONAL: leave this empty (or remove the field) and the daemon will
+# send unsigned deliveries — perfectly fine for internal-network setups
+# where merchant and daemon share a trusted path. Set the secret only
+# when the receiver is exposed to the internet.
+secret = ""
+
+# Maximum delivery attempts before the event lands in the dead-letter
+# table. With the default backoff (2s, 4s, 8s, ... capped at 1h),
+# 10 attempts gives the merchant about a day to fix a broken endpoint.
+max_attempts = 10
