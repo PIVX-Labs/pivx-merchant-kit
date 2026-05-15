@@ -1889,6 +1889,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bip39",
+ "hmac 0.12.1",
  "pivx-wallet-kit",
  "rand_core 0.6.4",
  "reqwest",

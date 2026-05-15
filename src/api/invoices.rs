@@ -141,6 +141,12 @@ pub async fn cancel(
         )));
     }
     invoices::update_status(&state.db, id, InvoiceStatus::Cancelled).await?;
+    crate::webhooks::enqueue(
+        &state.db,
+        id,
+        crate::webhooks::EventType::InvoiceCancelled,
+    )
+    .await?;
     let payments = payments::list_for_invoice(&state.db, id).await?;
     let mut invoice = invoice;
     invoice.status = InvoiceStatus::Cancelled;

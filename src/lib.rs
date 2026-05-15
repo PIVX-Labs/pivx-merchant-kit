@@ -14,3 +14,4 @@ pub mod payment;
 pub mod storage;
 pub mod sync;
 pub mod wallet;
+pub mod webhooks;

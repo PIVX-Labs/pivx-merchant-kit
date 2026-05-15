@@ -138,8 +138,14 @@ pub async fn tick(
                 amount_due = invoice.amount_due_sat,
                 confirmed_sat = confirmed,
                 threshold = config.confirmations,
-                "invoice confirmed — webhook (Stage 6) will fire"
+                "invoice confirmed — enqueuing webhook"
             );
+            crate::webhooks::enqueue(
+                db,
+                invoice_id,
+                crate::webhooks::EventType::InvoiceConfirmed,
+            )
+            .await?;
         }
     }
 

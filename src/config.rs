@@ -104,11 +104,18 @@ pub struct ApiConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WebhooksConfig {
-    /// HTTPS endpoint on the merchant's backend that receives signed events.
+    /// HTTP endpoint the daemon POSTs events to. Set to empty to disable
+    /// webhooks entirely (the daemon will still record events in the DB,
+    /// callers just have to poll the API).
     pub url: String,
-    /// HMAC-SHA256 secret. Delivery body is signed and the digest is sent in
-    /// the `X-Merchant-Signature` header (hex-encoded). The merchant verifies
-    /// the signature before trusting the payload.
+    /// **Optional** HMAC-SHA256 secret. When set, every delivery body is
+    /// signed and the digest is sent in the `X-Merchant-Signature` header
+    /// (hex). When empty/missing, deliveries are unsigned — fine for
+    /// internal-network deployments where the merchant and the daemon
+    /// share a trusted network path. Set this when the webhook target
+    /// is exposed to the internet so the receiver can prove a request
+    /// genuinely came from this daemon.
+    #[serde(default)]
     pub secret: String,
     /// Maximum delivery attempts before the event lands in the dead letter
     /// table. Exponential backoff between attempts.
@@ -157,9 +164,16 @@ impl Config {
                 "api.auth_token must be set to a non-default value".into(),
             ));
         }
-        if self.webhooks.secret.is_empty() || self.webhooks.secret == "REPLACE_ME" {
+        // webhooks.secret is intentionally optional. We only reject the
+        // literal placeholder so a half-configured deployment surfaces
+        // visibly. Empty / missing is a legitimate "I don't need HMAC"
+        // signal for internal-network setups.
+        if self.webhooks.secret == "REPLACE_ME" {
             return Err(Error::Config(
-                "webhooks.secret must be set to a non-default value".into(),
+                "webhooks.secret is set to the placeholder — either pick a real \
+                 secret or remove the field entirely (unsigned deliveries are \
+                 fine for internal networks)"
+                    .into(),
             ));
         }
         if self.webhooks.max_attempts == 0 {
@@ -257,6 +271,28 @@ secret = "real-secret-here"
             .replace(r#"secret = "real-secret-here""#, r#"secret = "REPLACE_ME""#);
         let cfg: Config = toml::from_str(&toml).unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn allows_empty_webhook_secret_for_internal_networks() {
+        // Empty secret = "I don't want signatures, this is internal-only".
+        // Should validate cleanly — the daemon will just send unsigned
+        // deliveries.
+        let toml = good_config_toml()
+            .replace(r#"secret = "real-secret-here""#, r#"secret = """#);
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.webhooks.secret.is_empty());
+    }
+
+    #[test]
+    fn allows_missing_webhook_secret_field() {
+        // `secret` field absent entirely — same as empty, default String.
+        let toml = good_config_toml()
+            .replace("\nsecret = \"real-secret-here\"\n", "\n");
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.webhooks.secret.is_empty());
     }
 
     #[test]

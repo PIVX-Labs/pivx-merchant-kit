@@ -246,6 +246,7 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
     let bind_addr = cfg.api.bind.clone();
     let state = SyncState::new(db, wallet, wallet_path, unlock_key, cfg)?;
     let sync_task = tokio::spawn(sync::run(state.clone()));
+    let webhook_task = tokio::spawn(crate::webhooks::run(state.clone()));
 
     // HTTP control plane.
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -268,6 +269,7 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
     tracing::info!("shutdown signal received, exiting");
     sync_task.abort();
     api_task.abort();
+    webhook_task.abort();
     Ok(())
 }
 

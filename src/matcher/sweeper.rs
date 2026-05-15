@@ -28,6 +28,12 @@ pub async fn tick(db: &Db, now: i64) -> Result<usize> {
                 prev = %invoice.status.as_str(),
                 "invoice expired"
             );
+            crate::webhooks::enqueue(
+                db,
+                invoice.id,
+                crate::webhooks::EventType::InvoiceExpired,
+            )
+            .await?;
         }
     }
     Ok(expired)
