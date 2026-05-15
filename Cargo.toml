@@ -17,7 +17,26 @@ path = "src/main.rs"
 [dependencies]
 # Shared PIVX wallet core. Pinned to a release tag for reproducible builds;
 # bump when a new wallet-kit feature is needed.
-pivx-wallet-kit = { git = "https://github.com/PIVX-Labs/pivx-wallet-kit", tag = "v0.2.0" }
+pivx-wallet-kit = { git = "https://github.com/PIVX-Labs/pivx-wallet-kit", tag = "v0.2.1" }
+
+# Wallet uses SHA-256 of the passphrase as the encryption key. The kit's
+# `serialize_encrypted` takes a `&[u8; 32]`, and SHA-256's digest length
+# happens to match. No PBKDF2/scrypt — the daemon's threat model is local-
+# disk theft, not online cracking; an attacker with disk access typically
+# also has the live unlock token anyway.
+sha2 = "0.10"
+
+# Zero-on-drop wrappers for the bip39 seed and decrypted secret material.
+# wallet-kit already uses zeroize internally; we mirror the discipline at
+# the daemon boundary.
+zeroize = { version = "1.8", features = ["derive"] }
+
+# BIP39 mnemonic parsing/generation for init + import flows.
+bip39 = "2"
+rand_core = { version = "0.6", features = ["std"] }
+
+# Secure passphrase reading: no echo on tty, plain line read from pipe.
+rpassword = "7"
 
 # Async runtime — daemon needs concurrent sync loop, HTTP server, and webhook
 # delivery workers. `rt-multi-thread` enables work-stealing across cores.
