@@ -243,17 +243,31 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
         "wallet ready"
     );
 
+    let bind_addr = cfg.api.bind.clone();
     let state = SyncState::new(db, wallet, wallet_path, unlock_key, cfg)?;
-    let sync_task = tokio::spawn(sync::run(state));
+    let sync_task = tokio::spawn(sync::run(state.clone()));
 
-    tracing::info!("daemon running — API server and matcher land in Stages 5/4");
+    // HTTP control plane.
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
+        .await
+        .map_err(|e| Error::Config(format!("api bind {}: {}", bind_addr, e)))?;
+    let local_addr = listener.local_addr().ok();
+    tracing::info!(bind = ?local_addr, "api server listening");
+    let router = crate::api::router(state.clone());
+    let api_task = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, router).await {
+            tracing::error!(err = %e, "api server exited with error");
+        }
+    });
 
-    // For Stage 3b, the daemon stays up while the sync loop runs. SIGINT
-    // handling lands in Stage 8; for now Ctrl-C terminates the process,
-    // sync loop never returns voluntarily (it's a loop {}).
+    tracing::info!("daemon running");
+
+    // Proper SIGINT handling lands in Stage 8. For now Ctrl-C terminates
+    // the process and we abort the two background tasks.
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutdown signal received, exiting");
     sync_task.abort();
+    api_task.abort();
     Ok(())
 }
 

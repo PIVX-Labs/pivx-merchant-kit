@@ -4,6 +4,7 @@
 //! daemon; the library exposes its modules for unit + integration testing and
 //! for embedders who want to drive the lifecycle programmatically.
 
+pub mod api;
 pub mod cli;
 pub mod config;
 pub mod error;

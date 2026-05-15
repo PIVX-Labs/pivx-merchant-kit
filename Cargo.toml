@@ -40,6 +40,12 @@ rand_core = { version = "0.6", features = ["std"] }
 # `gzip` because explorer responses for invoice-heavy wallets can be large.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 
+# HTTP control plane. axum is the same stack PIVX Tasks uses, so anyone
+# who learns one learns the other.
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace"] }
+
 # Direct dep on the librustpivx fork of the sapling crate so the matcher
 # can deserialize SerializedNote.note (a JSON-encoded sapling::Note) and
 # extract the recipient PaymentAddress + value. Resolver dedupes with
