@@ -17,6 +17,18 @@ pub enum Error {
 
     #[error("invoice: {0}")]
     Invoice(String),
+
+    #[error("storage: {0}")]
+    Sqlx(#[from] sqlx::Error),
+
+    #[error("migrate: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
+
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("parse: {0}")]
+    Parse(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

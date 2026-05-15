@@ -39,6 +39,17 @@ toml = "0.8"
 # matters because the invoice ID is used as the public payment reference.
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Storage. `runtime-tokio-rustls` plugs sqlx into the existing tokio
+# runtime; `sqlite` is the embedded backend; `migrate` enables the
+# `sqlx::migrate!()` macro that wires up our ./migrations/ folder.
+# We deliberately use runtime-checked queries (sqlx::query) rather than
+# the macro variant — no DATABASE_URL needed at build time, full test
+# suite catches bad SQL.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros", "uuid"] }
+
+[dev-dependencies]
+tempfile = "3"
+
 # Inherit the same transitive-dep pins as wallet-kit / agent-kit. Without these,
 # the orchard/redjubjub deps pulled in by librustpivx won't resolve.
 [patch.crates-io]

@@ -21,6 +21,29 @@ pub enum PaymentChannel {
     Shield,
 }
 
+impl PaymentChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Transparent => "transparent",
+            Self::Shield => "shield",
+        }
+    }
+}
+
+impl std::str::FromStr for PaymentChannel {
+    type Err = crate::error::Error;
+    fn from_str(s: &str) -> crate::error::Result<Self> {
+        match s {
+            "transparent" => Ok(Self::Transparent),
+            "shield" => Ok(Self::Shield),
+            other => Err(crate::error::Error::Parse(format!(
+                "unknown PaymentChannel: {}",
+                other
+            ))),
+        }
+    }
+}
+
 /// Invoice lifecycle.
 ///
 /// `Pending → PartiallyPaid → Confirming → Confirmed` is the happy path.
@@ -50,6 +73,35 @@ impl InvoiceStatus {
     /// (no cancel during Confirming).
     pub fn is_cancellable(self) -> bool {
         matches!(self, Self::Pending | Self::PartiallyPaid)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::PartiallyPaid => "partially_paid",
+            Self::Confirming => "confirming",
+            Self::Confirmed => "confirmed",
+            Self::Expired => "expired",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::str::FromStr for InvoiceStatus {
+    type Err = crate::error::Error;
+    fn from_str(s: &str) -> crate::error::Result<Self> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "partially_paid" => Ok(Self::PartiallyPaid),
+            "confirming" => Ok(Self::Confirming),
+            "confirmed" => Ok(Self::Confirmed),
+            "expired" => Ok(Self::Expired),
+            "cancelled" => Ok(Self::Cancelled),
+            other => Err(crate::error::Error::Parse(format!(
+                "unknown InvoiceStatus: {}",
+                other
+            ))),
+        }
     }
 }
 
