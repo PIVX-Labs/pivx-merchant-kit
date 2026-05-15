@@ -133,6 +133,7 @@ pub async fn run_tick(state: &SyncState) -> Result<()> {
     let conf_updated = matcher::confirms::tick(
         &state.db,
         &state.config.payments,
+        state.config.refunds.enabled,
         chain_tip,
         now,
     )
@@ -146,7 +147,7 @@ pub async fn run_tick(state: &SyncState) -> Result<()> {
     }
 
     // Expiry sweeper.
-    let expired = matcher::sweeper::tick(&state.db, now).await?;
+    let expired = matcher::sweeper::tick(&state.db, &state.config, now).await?;
     if expired > 0 {
         tracing::info!(count = expired, "invoices expired");
     }

@@ -31,6 +31,7 @@ use sqlx::Row;
 pub async fn tick(
     db: &Db,
     config: &PaymentsConfig,
+    refunds_enabled: bool,
     chain_tip: u32,
     now: i64,
 ) -> Result<usize> {
@@ -140,6 +141,13 @@ pub async fn tick(
                 threshold = config.confirmations,
                 "invoice confirmed — enqueuing webhook"
             );
+            // Reload the invoice so we have the freshest status
+            // (just updated) for the refund check.
+            let refreshed = invoices::get(db, invoice_id).await?.unwrap_or(invoice);
+            crate::refunds::maybe_enqueue_overpayment(
+                db, &refreshed, config, refunds_enabled,
+            )
+            .await?;
             crate::webhooks::enqueue(
                 db,
                 invoice_id,
@@ -196,7 +204,7 @@ mod tests {
         let p = Payment::new(inv.id, "tx1".into(), 0, 1000, 1);
         payments::insert(&db, &p).await.unwrap();
 
-        let updated = tick(&db, &cfg(3), 100, 5).await.unwrap();
+        let updated = tick(&db, &cfg(3), false, 100, 5).await.unwrap();
         assert_eq!(updated, 1);
         let listed = payments::list_for_invoice(&db, inv.id).await.unwrap();
         assert_eq!(listed[0].confirmations, 1);
@@ -212,7 +220,7 @@ mod tests {
         payments::insert(&db, &p).await.unwrap();
 
         for _ in 0..3 {
-            tick(&db, &cfg(3), 100, 5).await.unwrap();
+            tick(&db, &cfg(3), false, 100, 5).await.unwrap();
         }
 
         let listed = payments::list_for_invoice(&db, inv.id).await.unwrap();
@@ -235,7 +243,7 @@ mod tests {
         payments::insert(&db, &deep).await.unwrap();
         payments::insert(&db, &shallow).await.unwrap();
 
-        tick(&db, &cfg(3), 100, 5).await.unwrap();
+        tick(&db, &cfg(3), false, 100, 5).await.unwrap();
 
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
         // shallow advanced to 2 confs, still under threshold 3.
@@ -253,7 +261,7 @@ mod tests {
         let mut p = Payment::new(inv.id, "tx".into(), 0, 1000, 1);
         p.confirmations = 5;
         payments::insert(&db, &p).await.unwrap();
-        tick(&db, &cfg(3), 100, 5).await.unwrap();
+        tick(&db, &cfg(3), false, 100, 5).await.unwrap();
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
         assert_eq!(updated.status, InvoiceStatus::Confirmed);
     }
@@ -269,7 +277,7 @@ mod tests {
         invoices::insert(&db, &inv).await.unwrap();
         let p = Payment::new(inv.id, "tx".into(), 0, 1000, 1);
         payments::insert(&db, &p).await.unwrap();
-        tick(&db, &cfg(0), 100, 5).await.unwrap();
+        tick(&db, &cfg(0), false, 100, 5).await.unwrap();
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
         assert_eq!(updated.status, InvoiceStatus::Confirmed);
     }

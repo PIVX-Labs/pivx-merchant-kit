@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod error;
 pub mod invoices;
+pub mod refunds;
 pub mod types;
 
 use crate::sync::SyncState;
@@ -26,6 +27,9 @@ pub fn router(state: Arc<SyncState>) -> Router {
         .route("/v1/invoices", post(invoices::create).get(invoices::list))
         .route("/v1/invoices/:id", get(invoices::get))
         .route("/v1/invoices/:id/cancel", post(invoices::cancel))
+        .route("/v1/refunds", get(refunds::list))
+        .route("/v1/refunds/:id", get(refunds::get))
+        .route("/v1/refunds/:id/broadcast", post(refunds::mark_broadcast))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,

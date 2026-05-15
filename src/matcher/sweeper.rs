@@ -8,12 +8,15 @@
 //! the sweeper's SQL also filters for `Pending`/`PartiallyPaid` so
 //! Confirming rows never get loaded in the first place.
 
+use crate::config::Config;
 use crate::error::Result;
 use crate::invoice::{next_status_on_tick, InvoiceStatus};
 use crate::storage::{invoices, Db};
 
 /// Sweep all expirable invoices. Returns the count that transitioned.
-pub async fn tick(db: &Db, now: i64) -> Result<usize> {
+/// `config` is needed for the refund-detection hook — partial-paid
+/// expired invoices may need a refund row created.
+pub async fn tick(db: &Db, config: &Config, now: i64) -> Result<usize> {
     let candidates = invoices::list_expirable(db, now).await?;
     let mut expired = 0usize;
     for invoice in candidates {
@@ -28,6 +31,14 @@ pub async fn tick(db: &Db, now: i64) -> Result<usize> {
                 prev = %invoice.status.as_str(),
                 "invoice expired"
             );
+            // Refund check happens BEFORE the webhook so the webhook
+            // payload includes the refund record if one was created.
+            crate::refunds::maybe_enqueue_partial_expired(
+                db,
+                &invoice,
+                config.refunds.enabled,
+            )
+            .await?;
             crate::webhooks::enqueue(
                 db,
                 invoice.id,
@@ -42,8 +53,40 @@ pub async fn tick(db: &Db, now: i64) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        AcceptPolicy, ApiConfig, Config, NetworkConfig, PaymentsConfig, RefundsConfig,
+        SyncConfig, WalletConfig, WebhooksConfig,
+    };
     use crate::invoice::{Invoice, PaymentChannel};
     use uuid::Uuid;
+
+    fn test_config() -> Config {
+        Config {
+            network: NetworkConfig { name: "mainnet".into() },
+            wallet: WalletConfig { data_dir: "/tmp".into() },
+            sync: SyncConfig {
+                rpc_url: "https://x".into(),
+                explorer_url: "https://x".into(),
+                poll_interval_secs: 30,
+            },
+            payments: PaymentsConfig {
+                accept: AcceptPolicy::Both,
+                confirmations: 3,
+                default_expiry_secs: 1800,
+                partial_reset_secs: 1800,
+            },
+            refunds: RefundsConfig { enabled: false },
+            api: ApiConfig {
+                bind: "127.0.0.1:0".into(),
+                auth_token: "t".into(),
+            },
+            webhooks: WebhooksConfig {
+                url: "https://x".into(),
+                secret: String::new(),
+                max_attempts: 10,
+            },
+        }
+    }
 
     fn invoice(addr: &str, status: InvoiceStatus, expires_at: i64) -> Invoice {
         Invoice {
@@ -65,7 +108,7 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr1", InvoiceStatus::Pending, 100);
         invoices::insert(&db, &inv).await.unwrap();
-        let n = tick(&db, 500).await.unwrap();
+        let n = tick(&db, &test_config(), 500).await.unwrap();
         assert_eq!(n, 1);
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
         assert_eq!(updated.status, InvoiceStatus::Expired);
@@ -79,7 +122,7 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr2", InvoiceStatus::PartiallyPaid, 100);
         invoices::insert(&db, &inv).await.unwrap();
-        let n = tick(&db, 500).await.unwrap();
+        let n = tick(&db, &test_config(), 500).await.unwrap();
         assert_eq!(n, 1);
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
         assert_eq!(updated.status, InvoiceStatus::Expired);
@@ -92,7 +135,7 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr3", InvoiceStatus::Confirming, 100);
         invoices::insert(&db, &inv).await.unwrap();
-        let n = tick(&db, 500).await.unwrap();
+        let n = tick(&db, &test_config(), 500).await.unwrap();
         assert_eq!(n, 0);
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
         assert_eq!(updated.status, InvoiceStatus::Confirming);
@@ -103,7 +146,7 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr4", InvoiceStatus::Pending, 9999);
         invoices::insert(&db, &inv).await.unwrap();
-        let n = tick(&db, 500).await.unwrap();
+        let n = tick(&db, &test_config(), 500).await.unwrap();
         assert_eq!(n, 0);
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
         assert_eq!(updated.status, InvoiceStatus::Pending);
@@ -115,7 +158,7 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr5", InvoiceStatus::Expired, 100);
         invoices::insert(&db, &inv).await.unwrap();
-        let n = tick(&db, 500).await.unwrap();
+        let n = tick(&db, &test_config(), 500).await.unwrap();
         assert_eq!(n, 0);
     }
 
@@ -126,7 +169,7 @@ mod tests {
             let inv = invoice(&format!("Addr{}", i), InvoiceStatus::Pending, 100);
             invoices::insert(&db, &inv).await.unwrap();
         }
-        let n = tick(&db, 500).await.unwrap();
+        let n = tick(&db, &test_config(), 500).await.unwrap();
         assert_eq!(n, 5);
     }
 }
