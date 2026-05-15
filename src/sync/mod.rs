@@ -81,17 +81,33 @@ pub async fn run(state: Arc<SyncState>) {
     }
 }
 
-/// One full tick. Public so Stage 4's matcher can drive single iterations
-/// for integration testing without spawning the loop.
+/// One full tick. Public so integration tests can drive single
+/// iterations without spawning the loop.
+///
+/// Sequence:
+///  1. Transparent UTXO discovery → match → state machine
+///  2. Shield block sync → match → state machine
+///  3. Confirmation-depth update across all in-flight payments
+///  4. Expiry sweeper for stale invoices
+///  5. Persist wallet on advance
 pub async fn run_tick(state: &SyncState) -> Result<()> {
+    use crate::matcher;
+
+    let now = unix_now();
+    let chain_tip = state.rpc.block_count().await.unwrap_or(0);
+
     // Transparent doesn't need the wallet mutex (it only reads invoice DB
     // rows + makes HTTP calls). Run it first since it's fast.
     let discovered = transparent::tick(&state.db, &state.explorer).await?;
-    if !discovered.is_empty() {
-        tracing::info!(
-            count = discovered.len(),
-            "transparent sync discovered UTXO records (matcher lands in Stage 4)"
-        );
+    let t_matched = matcher::transparent::apply(
+        &state.db,
+        &state.config.payments,
+        discovered,
+        now,
+    )
+    .await?;
+    if t_matched > 0 {
+        tracing::info!(count = t_matched, "transparent matcher applied");
     }
 
     // Shield mutates wallet state — hold the lock for the duration of the
@@ -102,10 +118,41 @@ pub async fn run_tick(state: &SyncState) -> Result<()> {
         let mut wallet = state.wallet.lock().await;
         shield::tick(&mut wallet, &state.rpc).await?
     };
+    let s_matched = matcher::shield::apply(
+        &state.db,
+        &state.config.payments,
+        shield_result.new_notes,
+        now,
+    )
+    .await?;
+    if s_matched > 0 {
+        tracing::info!(count = s_matched, "shield matcher applied");
+    }
+
+    // Confirmation depth + Confirming → Confirmed sweep.
+    let conf_updated = matcher::confirms::tick(
+        &state.db,
+        &state.config.payments,
+        chain_tip,
+        now,
+    )
+    .await?;
+    if conf_updated > 0 {
+        tracing::debug!(
+            updated = conf_updated,
+            chain_tip = chain_tip,
+            "payment confirmations refreshed"
+        );
+    }
+
+    // Expiry sweeper.
+    let expired = matcher::sweeper::tick(&state.db, now).await?;
+    if expired > 0 {
+        tracing::info!(count = expired, "invoices expired");
+    }
 
     if shield_result.advanced {
         tracing::info!(
-            new_notes = shield_result.new_notes.len(),
             nullifiers = shield_result.nullifiers.len(),
             last_block = shield_result.last_block,
             "shield sync advanced"
@@ -118,4 +165,14 @@ pub async fn run_tick(state: &SyncState) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Unix seconds, captured once per tick so all state transitions
+/// within a single tick share the same "now" — keeps the partial-
+/// payment timer and the expiry sweeper consistent with each other.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

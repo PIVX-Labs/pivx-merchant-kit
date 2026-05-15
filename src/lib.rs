@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod invoice;
+pub mod matcher;
 pub mod payment;
 pub mod storage;
 pub mod sync;
