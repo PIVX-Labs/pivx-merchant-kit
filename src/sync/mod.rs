@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::storage::Db;
 use crate::sync::http::{ExplorerClient, RpcClient};
 use crate::wallet::Wallet;
+use pivx_wallet_kit::sapling::prover::SaplingProver;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +40,11 @@ pub struct SyncState {
     pub config: Config,
     pub explorer: ExplorerClient,
     pub rpc: RpcClient,
+    /// Sapling prover, present when shield invoices are enabled and the
+    /// params were successfully loaded at startup. `None` for
+    /// transparent-only deployments or when the CDN download failed —
+    /// the refund worker treats `None` as "shield refunds stay manual".
+    pub prover: Option<Arc<SaplingProver>>,
     /// Tripped on Ctrl-C / SIGTERM. Workers check it between ticks
     /// to break out cleanly instead of being aborted mid-write.
     pub shutdown: Arc<tokio::sync::Notify>,
@@ -51,6 +57,7 @@ impl SyncState {
         wallet_path: PathBuf,
         unlock_key: [u8; 32],
         config: Config,
+        prover: Option<Arc<SaplingProver>>,
     ) -> Result<Arc<Self>> {
         let explorer = ExplorerClient::new(&config.sync.explorer_url)?;
         let rpc = RpcClient::new(&config.sync.rpc_url)?;
@@ -62,6 +69,7 @@ impl SyncState {
             config,
             explorer,
             rpc,
+            prover,
             shutdown: Arc::new(tokio::sync::Notify::new()),
         }))
     }

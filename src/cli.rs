@@ -244,7 +244,33 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
     );
 
     let bind_addr = cfg.api.bind.clone();
-    let state = SyncState::new(db, wallet, wallet_path.clone(), unlock_key, cfg)?;
+
+    // Sapling proving params — load now if shield invoices are in the
+    // accept policy so refund tx construction never blocks on a mid-
+    // flight CDN fetch. Transparent-only deployments skip the ~97MB
+    // download entirely. Failure is non-fatal: transparent still works,
+    // shield refunds stay manual.
+    let prover = if crate::prover::shield_enabled(cfg.payments.accept) {
+        match crate::prover::load_or_download(&cfg.wallet.data_dir).await {
+            Ok(p) => {
+                tracing::info!("sapling prover ready — shield refunds will auto-broadcast");
+                Some(p)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    err = %e,
+                    "sapling params unavailable — shield refunds will stay manual until \
+                     params download succeeds. Restart the daemon to retry."
+                );
+                None
+            }
+        }
+    } else {
+        tracing::info!("shield not in accept policy — skipping sapling params download");
+        None
+    };
+
+    let state = SyncState::new(db, wallet, wallet_path.clone(), unlock_key, cfg, prover)?;
     let sync_task = tokio::spawn(sync::run(state.clone()));
     let webhook_task = tokio::spawn(crate::webhooks::run(state.clone()));
     let refund_task = tokio::spawn(crate::refunds::worker::run(state.clone()));
