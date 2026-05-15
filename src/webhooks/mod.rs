@@ -46,9 +46,9 @@ impl EventType {
     }
 }
 
-/// Run the webhook worker forever. Polls every 5 seconds for due
+/// Run the webhook worker until shutdown. Polls every 5 seconds for due
 /// deliveries; that's quick enough to give snappy delivery without
-/// hammering SQLite.
+/// hammering SQLite. Stops cleanly on shutdown signal.
 pub async fn run(state: Arc<SyncState>) {
     let interval = Duration::from_secs(5);
     tracing::info!("webhook worker starting");
@@ -56,7 +56,13 @@ pub async fn run(state: Arc<SyncState>) {
         if let Err(e) = tick(&state).await {
             tracing::warn!(err = %e, "webhook worker tick failed");
         }
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = state.shutdown.notified() => {
+                tracing::info!("webhook worker received shutdown signal");
+                return;
+            }
+        }
     }
 }
 

@@ -244,7 +244,7 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
     );
 
     let bind_addr = cfg.api.bind.clone();
-    let state = SyncState::new(db, wallet, wallet_path, unlock_key, cfg)?;
+    let state = SyncState::new(db, wallet, wallet_path.clone(), unlock_key, cfg)?;
     let sync_task = tokio::spawn(sync::run(state.clone()));
     let webhook_task = tokio::spawn(crate::webhooks::run(state.clone()));
 
@@ -255,22 +255,78 @@ async fn run_daemon(config_path: &std::path::Path) -> Result<()> {
     let local_addr = listener.local_addr().ok();
     tracing::info!(bind = ?local_addr, "api server listening");
     let router = crate::api::router(state.clone());
+    let shutdown_for_api = state.shutdown.clone();
     let api_task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
+        let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+            shutdown_for_api.notified().await;
+            tracing::info!("api server received shutdown signal");
+        });
+        if let Err(e) = server.await {
             tracing::error!(err = %e, "api server exited with error");
         }
     });
 
-    tracing::info!("daemon running");
+    tracing::info!("daemon running — press Ctrl-C for graceful shutdown");
 
-    // Proper SIGINT handling lands in Stage 8. For now Ctrl-C terminates
-    // the process and we abort the two background tasks.
-    tokio::signal::ctrl_c().await.ok();
-    tracing::info!("shutdown signal received, exiting");
-    sync_task.abort();
-    api_task.abort();
-    webhook_task.abort();
+    // Wait for either SIGINT or SIGTERM. SIGTERM is what systemd / docker
+    // send on `stop`; we treat both identically.
+    wait_for_shutdown_signal().await;
+    tracing::info!("shutdown signal received — draining workers");
+    state.shutdown.notify_waiters();
+
+    // Drain the three workers. axum's graceful_shutdown will finish any
+    // in-flight requests; sync + webhook loops break out at their next
+    // sleep boundary.
+    let _ = tokio::join!(sync_task, webhook_task, api_task);
+
+    // Final wallet save catches any progress between the last automatic
+    // writeback and the shutdown signal. Failing here is rare and not
+    // fatal — log loudly so the operator notices on next start (re-sync
+    // from the last persisted last_block).
+    {
+        let wallet = state.wallet.lock().await;
+        if let Err(e) = wallet.save_encrypted(&wallet_path, &state.unlock_key) {
+            tracing::error!(err = %e, "failed to save wallet on shutdown");
+        } else {
+            tracing::info!("wallet persisted to disk on shutdown");
+        }
+    }
+    tracing::info!("daemon stopped cleanly");
     Ok(())
+}
+
+/// Block until SIGINT or SIGTERM. Both are treated as "shut down
+/// gracefully" — Docker / Kubernetes / systemd all default to SIGTERM
+/// for a polite stop, and interactive terminals send SIGINT on Ctrl-C.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                // If we can't install the handler, fall back to ctrl-c only.
+                tokio::signal::ctrl_c().await.ok();
+                return;
+            }
+        };
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(_) => {
+                tokio::signal::ctrl_c().await.ok();
+                return;
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: Ctrl-C only.
+        tokio::signal::ctrl_c().await.ok();
+    }
 }
 
 #[cfg(test)]

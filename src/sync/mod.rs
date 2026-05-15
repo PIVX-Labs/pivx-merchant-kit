@@ -39,6 +39,9 @@ pub struct SyncState {
     pub config: Config,
     pub explorer: ExplorerClient,
     pub rpc: RpcClient,
+    /// Tripped on Ctrl-C / SIGTERM. Workers check it between ticks
+    /// to break out cleanly instead of being aborted mid-write.
+    pub shutdown: Arc<tokio::sync::Notify>,
 }
 
 impl SyncState {
@@ -59,13 +62,15 @@ impl SyncState {
             config,
             explorer,
             rpc,
+            shutdown: Arc::new(tokio::sync::Notify::new()),
         }))
     }
 }
 
-/// Loop forever, sleeping `poll_interval_secs` between ticks. Failures in
-/// either branch log a warning and continue — a network hiccup shouldn't
-/// kill the daemon.
+/// Loop until shutdown is signalled, sleeping `poll_interval_secs`
+/// between ticks. Failures in any sub-stage log a warning and continue —
+/// a network hiccup shouldn't kill the daemon. On shutdown signal,
+/// returns cleanly so the caller can persist last state.
 pub async fn run(state: Arc<SyncState>) {
     let interval = Duration::from_secs(state.config.sync.poll_interval_secs);
     tracing::info!(
@@ -77,7 +82,14 @@ pub async fn run(state: Arc<SyncState>) {
         if let Err(e) = run_tick(&state).await {
             tracing::warn!(err = %e, "sync tick failed");
         }
-        tokio::time::sleep(interval).await;
+        // Interruptable sleep — wakes immediately on shutdown.
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = state.shutdown.notified() => {
+                tracing::info!("sync loop received shutdown signal");
+                return;
+            }
+        }
     }
 }
 

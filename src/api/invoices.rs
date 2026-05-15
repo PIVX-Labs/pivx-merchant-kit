@@ -223,6 +223,7 @@ mod tests {
             unlock_key: Zeroizing::new([0u8; 32]),
             explorer: ExplorerClient::new(&config.sync.explorer_url).unwrap(),
             rpc: RpcClient::new(&config.sync.rpc_url).unwrap(),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
             config,
         })
     }
