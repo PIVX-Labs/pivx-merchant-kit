@@ -114,6 +114,22 @@ pub async fn update_amount_and_fee(
     Ok(())
 }
 
+/// Mark a refund dead — pulls it out of the worker's pending set so it
+/// won't be retried. Used for non-recoverable conditions: the parent
+/// invoice was deleted (refund has no destination), or the recomputed
+/// fee makes the refund a net-negative (dust). Operator inspects the
+/// dead-letter set via the API.
+pub async fn mark_dead(db: &Db, id: Uuid, reason: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE refunds SET status = 'dead' WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .execute(db.pool())
+    .await?;
+    tracing::info!(refund_id = %id, reason = %reason, "refund marked dead");
+    Ok(())
+}
+
 /// Mark a refund broadcast with its on-chain txid.
 pub async fn mark_broadcast(db: &Db, id: Uuid, txid: &str, now: i64) -> Result<()> {
     sqlx::query(

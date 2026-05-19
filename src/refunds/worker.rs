@@ -101,12 +101,12 @@ async fn broadcast_one(
 ) -> Result<()> {
     // Resolve the parent invoice for its channel + HD slot + source
     // address.
-    let invoice = invoices::get(db, refund.invoice_id).await?.ok_or_else(|| {
-        Error::Invoice(format!(
-            "refund {} references missing invoice {}",
-            refund.id, refund.invoice_id
-        ))
-    })?;
+    let Some(invoice) = invoices::get(db, refund.invoice_id).await? else {
+        // Parent invoice is gone (manual delete?). Refund can never
+        // succeed — mark dead so we don't retry every 30s forever.
+        queue::mark_dead(db, refund.id, "parent invoice missing").await?;
+        return Ok(());
+    };
 
     if invoice.channel == PaymentChannel::Shield {
         return broadcast_shield(db, wallet, rpc, prover, refund, &invoice).await;
@@ -139,14 +139,16 @@ async fn broadcast_one(
     let gross_sat = refund.amount_sat + refund.fee_sat;
     let exact_fee = crate::refunds::estimate_fee(utxos.len());
     if gross_sat <= exact_fee {
-        // Recomputed fee makes this a dust refund — skip + clean up.
-        tracing::info!(
-            refund_id = %refund.id,
-            gross_sat = gross_sat,
-            exact_fee = exact_fee,
-            utxos = utxos.len(),
-            "refund became dust after fee refinement; marking dead"
-        );
+        // Recomputed fee makes this a dust refund — net would be at
+        // or below zero. Mark dead so the worker stops retrying.
+        // Operator can see the dead-lettered row via GET /v1/refunds
+        // and decide whether the customer needs out-of-band handling.
+        queue::mark_dead(
+            db,
+            refund.id,
+            &format!("dust: gross {} <= fee {}", gross_sat, exact_fee),
+        )
+        .await?;
         return Ok(());
     }
     let exact_amount = gross_sat - exact_fee;
@@ -265,14 +267,26 @@ async fn broadcast_shield(
     let gross_sat = refund.amount_sat + refund.fee_sat;
     let shield_fee = pivx_wallet_kit::fees::estimate_fee(0, 0, 1, 2);
     if gross_sat <= shield_fee {
+        // Mark dead so the worker stops retrying. With Sapling fees
+        // at ~2.4M sat, this fires on any partial smaller than that —
+        // the merchant ends up keeping a tiny amount the customer
+        // can't economically recover. Operators who care should
+        // accept transparent for small-ticket flows.
+        queue::mark_dead(
+            db,
+            refund.id,
+            &format!(
+                "shield dust: gross {} <= shield_fee {}",
+                gross_sat, shield_fee
+            ),
+        )
+        .await?;
         tracing::warn!(
             refund_id = %refund.id,
             invoice_id = %invoice.id,
             gross_sat = gross_sat,
             shield_fee = shield_fee,
-            "shield refund would be dust after fee — skipping. The customer's \
-             partial payment was smaller than the cost of a shield refund tx; \
-             operator may want to refund to a transparent address instead."
+            "shield refund would be dust after fee — marked dead"
         );
         return Ok(());
     }

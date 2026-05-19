@@ -28,6 +28,7 @@ pub async fn apply(
 ) -> Result<usize> {
     let mut inserted = 0usize;
     for serialized in notes {
+        let note_height = serialized.height;
         let Some((invoice_id, amount_sat, txid_proxy)) = match_note(&serialized, db).await? else {
             // Note doesn't correspond to any known invoice address.
             // That's expected for, e.g., shield change outputs from our
@@ -41,7 +42,7 @@ pub async fn apply(
         // `UNIQUE(txid, vout)` constraint dedupes repeat observations
         // across sync ticks. vout = 0 since the constraint expects a
         // tuple; the nullifier alone guarantees uniqueness.
-        let payment = Payment::new(invoice_id, txid_proxy, 0, amount_sat, now);
+        let payment = Payment::new(invoice_id, txid_proxy, 0, amount_sat, note_height, now);
         match payments::insert(db, &payment).await {
             Ok(()) => {
                 inserted += 1;

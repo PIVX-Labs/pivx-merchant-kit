@@ -1,7 +1,9 @@
-//! Refund REST endpoints. Read-only for now (refunds are auto-created
-//! by the matcher). When Stage 7b lands the actual broadcaster, this
-//! file gains a `mark_broadcast` endpoint for the operator-manual
-//! workflow.
+//! Refund REST endpoints. Refunds are auto-created by the matcher and
+//! auto-broadcast by the refund worker. The `mark_broadcast` endpoint
+//! exists for the operator-manual fallback: if auto-broadcast can't
+//! work (Sapling prover unavailable, RPC outage, edge case), the
+//! operator can build the tx in another wallet and record the txid here
+//! so the merchant-kit DB matches reality.
 
 use crate::api::error::ApiError;
 use crate::refunds::queue;
@@ -84,15 +86,30 @@ pub struct MarkBroadcastRequest {
 
 /// POST /v1/refunds/:id/broadcast
 ///
-/// Operator workflow until Stage 7b lands: build the refund tx in your
-/// wallet (or via pivx-agent-kit), broadcast it, post the txid here so
-/// the merchant-kit record matches reality.
+/// Operator fallback for when the daemon's auto-broadcast couldn't run
+/// (Sapling prover unavailable, RPC outage, etc.): the operator builds
+/// the refund tx in another wallet, broadcasts it, then records the
+/// txid here so the merchant-kit DB matches reality.
+///
+/// Refuses to overwrite a refund that's already in any non-pending
+/// status — once the daemon (or a previous manual call) has recorded a
+/// broadcast, the txid is immutable. Without this guard an operator (or
+/// anyone with the bearer token) could overwrite the real on-chain
+/// txid with a fake hex string, breaking reconciliation.
 pub async fn mark_broadcast(
     State(state): State<Arc<SyncState>>,
     Path(id): Path<Uuid>,
     Json(req): Json<MarkBroadcastRequest>,
 ) -> Result<Json<RefundResponse>, ApiError> {
-    let _ = queue::get(&state.db, id).await?.ok_or(ApiError::NotFound)?;
+    let existing = queue::get(&state.db, id).await?.ok_or(ApiError::NotFound)?;
+    if existing.status != "pending" {
+        return Err(ApiError::Conflict(format!(
+            "refund is already in status `{}` with txid {:?} — cannot overwrite. \
+             Use the existing record or create a new refund row if a re-broadcast \
+             is genuinely needed.",
+            existing.status, existing.txid
+        )));
+    }
     let txid = req.txid.trim();
     if txid.len() != 64 || !txid.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(ApiError::BadRequest(

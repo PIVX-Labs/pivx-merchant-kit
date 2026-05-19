@@ -29,6 +29,10 @@ pub async fn apply(
             d.utxo.txid.clone(),
             d.utxo.vout,
             d.utxo.amount,
+            // Blockbook reports `height = 0` for mempool UTXOs and the
+            // real height once mined. Match that semantic — the
+            // confirmation matcher uses 0 to mean "still mempool".
+            d.utxo.height,
             now,
         );
         match payments::insert(db, &payment).await {

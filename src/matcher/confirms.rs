@@ -1,21 +1,25 @@
 //! Confirmation-depth tracking and Confirming → Confirmed transitions.
 //!
-//! Every payment row carries a `confirmations` value the matcher
-//! refreshes against the current chain tip on each tick. When the
-//! confirmed amount on an invoice crosses the configured threshold,
-//! the invoice transitions Confirmed and (in Stage 6) fires a webhook.
+//! Every payment row carries a `block_height` (the chain height the tx
+//! was mined into, or 0 if still in the mempool) and a `confirmations`
+//! count. Each tick:
 //!
-//! Two things make this layer load-bearing:
+//!   1. Fetches the current chain tip.
+//!   2. For every payment on an in-flight invoice, recomputes
+//!      `confirmations = max(0, chain_tip - block_height + 1)` when
+//!      `block_height != 0`, else 0 (still mempool).
+//!   3. Re-evaluates each affected invoice. If the sum of payments at or
+//!      above the threshold covers `amount_due_sat`, transitions
+//!      Confirming → Confirmed and emits the webhook.
 //!
-//!   1. **Reorg safety.** Confirmations only ever monotonically increase
-//!      from the daemon's perspective: if the tip rolls back (1-block
-//!      reorg), we naturally see depth decrease and adjust the row. The
-//!      `confirmed_at` timestamp uses `COALESCE` so we never lose the
-//!      first-confirm moment.
-//!   2. **Threshold-only transition.** We transition Confirmed only when
-//!      the sum of confirmed payment values >= amount_due. A 4-conf
-//!      partial + a 1-conf top-up with threshold=3 still leaves the
-//!      invoice Confirming until the top-up matures.
+//! **Reorg safety**: the count naturally decreases if the tip rolls
+//! back. The `confirmed_at` timestamp uses `COALESCE` so the
+//! first-confirm moment is preserved across reorgs.
+//!
+//! **Threshold semantics**: a 5-conf partial + 1-conf top-up with
+//! threshold = 3 still leaves the invoice Confirming until the top-up
+//! matures, because `confirmed_amount_for_invoice` only sums payments
+//! at or above the threshold.
 
 use crate::config::PaymentsConfig;
 use crate::error::Result;
@@ -23,11 +27,6 @@ use crate::invoice::{next_status_on_confirmation, InvoiceStatus};
 use crate::storage::{invoices, payments, Db};
 use sqlx::Row;
 
-/// Refresh confirmation counts for every payment row whose parent invoice
-/// is still in flight (Pending / PartiallyPaid / Confirming). For each
-/// payment, `confirmations = max(0, chain_tip - height + 1)`. Then
-/// re-evaluate each affected invoice's status against the configured
-/// threshold and transition Confirming → Confirmed where appropriate.
 pub async fn tick(
     db: &Db,
     config: &PaymentsConfig,
@@ -35,25 +34,8 @@ pub async fn tick(
     chain_tip: u32,
     now: i64,
 ) -> Result<usize> {
-    // Pull every payment row attached to a non-terminal invoice, along
-    // with the height the payment landed at. We need both the payment id
-    // and the invoice id to update the row and later re-check the parent.
-    //
-    // Height is stored in the `payments` table indirectly: we record it
-    // from the Blockbook UTXO record (or a derived height for shield
-    // notes). For Stage 4 we lean on the per-payment `seen_at` timestamp
-    // and a separate sweep that joins to invoices for any payments not
-    // yet confirmed. SQLite handles a few thousand rows this way easily;
-    // when the merchant outgrows that, the right answer is to add an
-    // index on `(invoice_status, confirmations)` and to denormalise the
-    // payment-height column we don't currently have.
-    //
-    // For now we use a simpler model: payments with `confirmations=0`
-    // are mempool, anything `>= 1` was already seen at some height.
-    // We approximate the height as `chain_tip - confirmations + 1` so
-    // the math is self-consistent across ticks.
     let rows = sqlx::query(
-        "SELECT p.id, p.invoice_id, p.confirmations, p.seen_at
+        "SELECT p.id, p.invoice_id, p.block_height, p.confirmations
            FROM payments p
            JOIN invoices i ON i.id = p.invoice_id
           WHERE i.status IN ('pending', 'partially_paid', 'confirming')",
@@ -66,40 +48,21 @@ pub async fn tick(
     for row in rows {
         let payment_id_str: String = row.try_get("id")?;
         let invoice_id_str: String = row.try_get("invoice_id")?;
+        let block_height: i64 = row.try_get("block_height")?;
         let confirmations: i64 = row.try_get("confirmations")?;
-        let seen_at: i64 = row.try_get("seen_at")?;
         let payment_id = uuid::Uuid::parse_str(&payment_id_str)
             .map_err(|e| crate::error::Error::Parse(format!("payment id: {}", e)))?;
         let invoice_id = uuid::Uuid::parse_str(&invoice_id_str)
             .map_err(|e| crate::error::Error::Parse(format!("invoice id: {}", e)))?;
 
-        // Compute the new confirmation count. If the payment is fresh
-        // (confirmations == 0) and the chain tip hasn't budged since we
-        // first saw it (very recent payment), keep it at 0. Otherwise
-        // bump by 1 per tick — we don't know the exact height the
-        // payment landed at without a richer per-payment metadata
-        // schema, but a strict +1 per chain advance is conservative
-        // and always under-counts (never premature). Stage 4b's
-        // followup work can refine this once we add `block_height`
-        // to the payments schema.
-        let new_confirmations = if confirmations == 0 {
-            // Brand-new payment, no prior tip recorded. Bump to 1 if
-            // chain has advanced since we saw it. Heuristic: any non-
-            // zero chain_tip + non-zero seen_at means a fresh poll has
-            // happened; conservatively bump by 1.
-            if chain_tip > 0 && seen_at > 0 {
-                1
-            } else {
-                0
-            }
+        // Compute the on-chain confirmation depth from the height the
+        // payment was mined at (0 = mempool) and the current chain tip.
+        // Naturally drops back to 0 on a reorg that uncrowns the block.
+        let block_height_u = u32::try_from(block_height).unwrap_or(0);
+        let new_confirmations: u32 = if block_height_u == 0 || chain_tip < block_height_u {
+            0
         } else {
-            // Monotonic increment per tick. Reorgs will surface as
-            // amount_confirmed dropping below threshold and Stage 4b's
-            // future revision will subtract; for now we err on the
-            // side of "never lose a confirmation" which keeps merchants
-            // safe at the cost of slightly delayed Confirmed
-            // transitions during reorgs.
-            confirmations + 1
+            chain_tip.saturating_sub(block_height_u).saturating_add(1)
         };
 
         let confirmed_at = if new_confirmations >= 1 && confirmations == 0 {
@@ -108,10 +71,44 @@ pub async fn tick(
             None
         };
 
-        if new_confirmations != confirmations {
-            payments::update_confirmations(db, payment_id, new_confirmations as u32, confirmed_at)
-                .await?;
+        if new_confirmations as i64 != confirmations {
+            payments::update_confirmations(db, payment_id, new_confirmations, confirmed_at).await?;
             updated += 1;
+            affected_invoices.insert(invoice_id);
+        } else if confirmations > 0
+            && config.confirmations > 0
+            && new_confirmations >= config.confirmations
+        {
+            // Belt-and-braces: payments already at or above threshold
+            // must still re-evaluate their parent invoice. Handles the
+            // edge case where confirmations didn't change this tick but
+            // the parent invoice is still Confirming (e.g. a fresh
+            // backfill where payments were inserted at confs >=
+            // threshold and the count happens to match this tip's
+            // computation exactly).
+            affected_invoices.insert(invoice_id);
+        }
+    }
+
+    // Special case for zero-conf deployments: with threshold = 0, every
+    // mempool-seen payment counts. The block-height-based computation
+    // above keeps mempool payments at confirmations = 0, so they pass
+    // the `>= 0` threshold check trivially. Make sure their parent
+    // invoices get re-evaluated by surfacing them here even if no
+    // confirmation count changed.
+    if config.confirmations == 0 {
+        let zero_conf_rows = sqlx::query(
+            "SELECT DISTINCT p.invoice_id
+               FROM payments p
+               JOIN invoices i ON i.id = p.invoice_id
+              WHERE i.status = 'confirming'",
+        )
+        .fetch_all(db.pool())
+        .await?;
+        for row in zero_conf_rows {
+            let invoice_id_str: String = row.try_get("invoice_id")?;
+            let invoice_id = uuid::Uuid::parse_str(&invoice_id_str)
+                .map_err(|e| crate::error::Error::Parse(format!("invoice id: {}", e)))?;
             affected_invoices.insert(invoice_id);
         }
     }
@@ -139,6 +136,7 @@ pub async fn tick(
                 amount_due = invoice.amount_due_sat,
                 confirmed_sat = confirmed,
                 threshold = config.confirmations,
+                chain_tip = chain_tip,
                 "invoice confirmed — enqueuing webhook"
             );
             // Reload the invoice so we have the freshest status
@@ -157,9 +155,6 @@ pub async fn tick(
         }
     }
 
-    // Suppress the chain_tip unused warning; it's wired through for the
-    // future precise-confirmation refactor described above.
-    let _ = chain_tip;
     Ok(updated)
 }
 
@@ -198,11 +193,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_tick_bumps_zero_to_one_confirmation() {
+    async fn payment_at_chain_tip_gets_one_confirmation() {
+        // Payment mined at the same height as the chain tip = 1 conf.
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr1", 1000, InvoiceStatus::Confirming);
         invoices::insert(&db, &inv).await.unwrap();
-        let p = Payment::new(inv.id, "tx1".into(), 0, 1000, 1);
+        // block_height = 100 (matches the chain tip we pass to tick)
+        let p = Payment::new(inv.id, "tx1".into(), 0, 1000, 100, 1);
         payments::insert(&db, &p).await.unwrap();
 
         let updated = tick(&db, &cfg(3), false, 100, 5).await.unwrap();
@@ -213,54 +210,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirms_advance_one_per_tick_until_threshold() {
+    async fn mempool_payment_stays_at_zero_confirmations() {
+        // Payment with block_height = 0 (mempool, not yet mined) stays
+        // at zero confirmations no matter how many ticks fire — this is
+        // the core fix for the v0.1.0 audit finding B1. The old code
+        // incremented +1 per tick regardless of chain advancement.
         let db = Db::open_memory().await.unwrap();
-        let inv = invoice("Addr2", 1000, InvoiceStatus::Confirming);
+        let inv = invoice("Addr1b", 1000, InvoiceStatus::Confirming);
         invoices::insert(&db, &inv).await.unwrap();
-        let p = Payment::new(inv.id, "tx1".into(), 0, 1000, 1);
+        let p = Payment::new(inv.id, "tx1".into(), 0, 1000, 0, 1);
         payments::insert(&db, &p).await.unwrap();
 
-        for _ in 0..3 {
+        for _ in 0..10 {
             tick(&db, &cfg(3), false, 100, 5).await.unwrap();
         }
 
         let listed = payments::list_for_invoice(&db, inv.id).await.unwrap();
-        assert_eq!(listed[0].confirmations, 3);
+        assert_eq!(listed[0].confirmations, 0);
+        let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
+        // Stays Confirming since 0 confs < threshold 3.
+        assert_eq!(updated.status, InvoiceStatus::Confirming);
+    }
+
+    #[tokio::test]
+    async fn confirms_track_chain_tip_advancement() {
+        // Payment mined at height 100. Chain advances tick-by-tick.
+        // Confirmations follow chain reality exactly.
+        let db = Db::open_memory().await.unwrap();
+        let inv = invoice("Addr2", 1000, InvoiceStatus::Confirming);
+        invoices::insert(&db, &inv).await.unwrap();
+        let p = Payment::new(inv.id, "tx1".into(), 0, 1000, 100, 1);
+        payments::insert(&db, &p).await.unwrap();
+
+        // Tip at 100 = 1 conf
+        tick(&db, &cfg(3), false, 100, 5).await.unwrap();
+        assert_eq!(
+            payments::list_for_invoice(&db, inv.id).await.unwrap()[0].confirmations,
+            1
+        );
+        // Tip at 101 = 2 confs
+        tick(&db, &cfg(3), false, 101, 5).await.unwrap();
+        assert_eq!(
+            payments::list_for_invoice(&db, inv.id).await.unwrap()[0].confirmations,
+            2
+        );
+        // Tip at 102 = 3 confs → invoice should now be Confirmed
+        tick(&db, &cfg(3), false, 102, 5).await.unwrap();
+        assert_eq!(
+            payments::list_for_invoice(&db, inv.id).await.unwrap()[0].confirmations,
+            3
+        );
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
         assert_eq!(updated.status, InvoiceStatus::Confirmed);
     }
 
     #[tokio::test]
+    async fn confirms_drop_on_reorg() {
+        // Reorg: the chain rolls back below the payment's mined height.
+        // Confirmations naturally drop to 0 (the saturating_sub branch).
+        //
+        // Threshold = 100 here so the payment never confirms the
+        // invoice during the test — once an invoice goes to Confirmed
+        // (terminal), the matcher stops updating its payments' confs,
+        // which is correct behavior but not what we're testing here.
+        let db = Db::open_memory().await.unwrap();
+        let inv = invoice("AddrR", 1000, InvoiceStatus::Confirming);
+        invoices::insert(&db, &inv).await.unwrap();
+        let p = Payment::new(inv.id, "tx1".into(), 0, 1000, 100, 1);
+        payments::insert(&db, &p).await.unwrap();
+
+        // Tip at 105 = 6 confs
+        tick(&db, &cfg(100), false, 105, 5).await.unwrap();
+        assert_eq!(
+            payments::list_for_invoice(&db, inv.id).await.unwrap()[0].confirmations,
+            6
+        );
+        // Reorg: tip rolls back to 99 (below the payment's height).
+        // The payment is effectively orphaned until re-mined.
+        tick(&db, &cfg(100), false, 99, 5).await.unwrap();
+        assert_eq!(
+            payments::list_for_invoice(&db, inv.id).await.unwrap()[0].confirmations,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn confirming_invoice_with_partial_confirms_below_threshold_stays_confirming() {
-        // Two payments totalling 1000, but only one has reached the
-        // 3-conf threshold. Invoice stays Confirming.
+        // Two payments totalling 1000, only one mined deep enough. Invoice
+        // stays Confirming because the confirmed amount is below the
+        // amount due.
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr3", 1000, InvoiceStatus::Confirming);
         invoices::insert(&db, &inv).await.unwrap();
-        let mut deep = Payment::new(inv.id, "tx-deep".into(), 0, 400, 1);
-        deep.confirmations = 5;
-        let mut shallow = Payment::new(inv.id, "tx-shallow".into(), 0, 600, 2);
-        shallow.confirmations = 1;
+        // deep mined at height 95, tip 100 = 6 confs
+        let deep = Payment::new(inv.id, "tx-deep".into(), 0, 400, 95, 1);
+        // shallow mined at height 100 (= tip), 1 conf
+        let shallow = Payment::new(inv.id, "tx-shallow".into(), 0, 600, 100, 2);
         payments::insert(&db, &deep).await.unwrap();
         payments::insert(&db, &shallow).await.unwrap();
 
         tick(&db, &cfg(3), false, 100, 5).await.unwrap();
 
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
-        // shallow advanced to 2 confs, still under threshold 3.
-        // Confirmed amount is just `deep`'s 400, below the 1000 due.
+        // Threshold 3: only `deep` (6 confs) counts. Confirmed amount
+        // is 400, below the 1000 due. Stays Confirming.
         assert_eq!(updated.status, InvoiceStatus::Confirming);
     }
 
     #[tokio::test]
     async fn confirmed_invoices_ignored() {
-        // Payment confirms past threshold but invoice is already Confirmed.
-        // No status change.
+        // Invoice already Confirmed → status stays Confirmed regardless
+        // of further chain advancement.
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr4", 1000, InvoiceStatus::Confirmed);
         invoices::insert(&db, &inv).await.unwrap();
-        let mut p = Payment::new(inv.id, "tx".into(), 0, 1000, 1);
-        p.confirmations = 5;
+        let p = Payment::new(inv.id, "tx".into(), 0, 1000, 95, 1);
         payments::insert(&db, &p).await.unwrap();
         tick(&db, &cfg(3), false, 100, 5).await.unwrap();
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();
@@ -268,15 +332,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_conf_threshold_confirms_immediately() {
-        // confirmations = 0 means any payment that lands counts as
-        // confirmed. The matcher bumps confirmations to 1 on the first
-        // tick (since chain_tip > 0), and that's >= 0, so the invoice
-        // confirms.
+    async fn zero_conf_threshold_confirms_mempool_payment() {
+        // Threshold = 0 means any payment (even mempool) clears the bar.
+        // The invoice transitions Confirming → Confirmed on the next
+        // tick regardless of whether the payment has been mined.
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr5", 1000, InvoiceStatus::Confirming);
         invoices::insert(&db, &inv).await.unwrap();
-        let p = Payment::new(inv.id, "tx".into(), 0, 1000, 1);
+        let p = Payment::new(inv.id, "tx".into(), 0, 1000, 0, 1); // mempool
         payments::insert(&db, &p).await.unwrap();
         tick(&db, &cfg(0), false, 100, 5).await.unwrap();
         let updated = invoices::get(&db, inv.id).await.unwrap().unwrap();

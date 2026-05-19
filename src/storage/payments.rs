@@ -17,20 +17,39 @@ pub async fn insert(db: &Db, payment: &Payment) -> Result<()> {
     })?;
     sqlx::query(
         "INSERT INTO payments (
-            id, invoice_id, txid, vout, amount_sat, confirmations,
-            seen_at, confirmed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            id, invoice_id, txid, vout, amount_sat, block_height,
+            confirmations, seen_at, confirmed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(payment.id.to_string())
     .bind(payment.invoice_id.to_string())
     .bind(&payment.txid)
     .bind(payment.vout as i64)
     .bind(amount)
+    .bind(payment.block_height as i64)
     .bind(payment.confirmations as i64)
     .bind(payment.seen_at)
     .bind(payment.confirmed_at)
     .execute(db.pool())
     .await?;
+    Ok(())
+}
+
+/// Update a payment's block_height. Called by the matcher when a
+/// payment that was previously seen at height 0 (mempool) gets mined
+/// into a block, OR when a reorg moves it to a different height. The
+/// confirmation matcher uses this height (against the current chain
+/// tip) to compute the depth each sweep.
+pub async fn update_block_height(
+    db: &Db,
+    payment_id: Uuid,
+    block_height: u32,
+) -> Result<()> {
+    sqlx::query("UPDATE payments SET block_height = ? WHERE id = ?")
+        .bind(block_height as i64)
+        .bind(payment_id.to_string())
+        .execute(db.pool())
+        .await?;
     Ok(())
 }
 
@@ -66,7 +85,7 @@ pub async fn confirmed_amount_for_invoice(
 
 pub async fn list_for_invoice(db: &Db, invoice_id: Uuid) -> Result<Vec<Payment>> {
     let rows = sqlx::query(
-        "SELECT id, invoice_id, txid, vout, amount_sat, confirmations,
+        "SELECT id, invoice_id, txid, vout, amount_sat, block_height, confirmations,
                 seen_at, confirmed_at
            FROM payments
           WHERE invoice_id = ?
@@ -104,6 +123,7 @@ fn row_to_payment(row: sqlx::sqlite::SqliteRow) -> Result<Payment> {
     let amount: i64 = row.try_get("amount_sat")?;
     let confs: i64 = row.try_get("confirmations")?;
     let vout: i64 = row.try_get("vout")?;
+    let block_height: i64 = row.try_get("block_height")?;
     Ok(Payment {
         id: Uuid::parse_str(&id_str)
             .map_err(|e| Error::Parse(format!("payment id not a UUID: {}", e)))?,
@@ -113,6 +133,8 @@ fn row_to_payment(row: sqlx::sqlite::SqliteRow) -> Result<Payment> {
         vout: u32::try_from(vout).map_err(|_| Error::Parse("vout out of range".into()))?,
         amount_sat: u64::try_from(amount)
             .map_err(|_| Error::Parse("negative amount_sat".into()))?,
+        block_height: u32::try_from(block_height)
+            .map_err(|_| Error::Parse("block_height out of range".into()))?,
         confirmations: u32::try_from(confs)
             .map_err(|_| Error::Parse("confirmations out of range".into()))?,
         seen_at: row.try_get("seen_at")?,
@@ -148,8 +170,8 @@ mod tests {
     async fn insert_then_list_roundtrip() {
         let db = Db::open_memory().await.unwrap();
         let inv = seed_invoice(&db, "PAddr1").await;
-        let p1 = Payment::new(inv.id, "txhash-a".into(), 0, 400_000, 1_700_000_100);
-        let p2 = Payment::new(inv.id, "txhash-b".into(), 1, 600_000, 1_700_000_200);
+        let p1 = Payment::new(inv.id, "txhash-a".into(), 0, 400_000, 0, 1_700_000_100);
+        let p2 = Payment::new(inv.id, "txhash-b".into(), 1, 600_000, 0, 1_700_000_200);
         insert(&db, &p1).await.unwrap();
         insert(&db, &p2).await.unwrap();
 
@@ -165,13 +187,13 @@ mod tests {
         let inv = seed_invoice(&db, "PAddr2").await;
         insert(
             &db,
-            &Payment::new(inv.id, "tx-a".into(), 0, 400_000, 1_700_000_100),
+            &Payment::new(inv.id, "tx-a".into(), 0, 400_000, 0, 1_700_000_100),
         )
         .await
         .unwrap();
         insert(
             &db,
-            &Payment::new(inv.id, "tx-b".into(), 0, 600_000, 1_700_000_200),
+            &Payment::new(inv.id, "tx-b".into(), 0, 600_000, 0, 1_700_000_200),
         )
         .await
         .unwrap();
@@ -191,9 +213,9 @@ mod tests {
     async fn confirmed_amount_only_counts_above_threshold() {
         let db = Db::open_memory().await.unwrap();
         let inv = seed_invoice(&db, "PAddr4").await;
-        let mut deep = Payment::new(inv.id, "tx-deep".into(), 0, 700_000, 1_700_000_100);
+        let mut deep = Payment::new(inv.id, "tx-deep".into(), 0, 700_000, 0, 1_700_000_100);
         deep.confirmations = 5;
-        let mut shallow = Payment::new(inv.id, "tx-shallow".into(), 0, 300_000, 1_700_000_200);
+        let mut shallow = Payment::new(inv.id, "tx-shallow".into(), 0, 300_000, 0, 1_700_000_200);
         shallow.confirmations = 1;
         insert(&db, &deep).await.unwrap();
         insert(&db, &shallow).await.unwrap();
@@ -222,8 +244,8 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let a = seed_invoice(&db, "PAddr5a").await;
         let b = seed_invoice(&db, "PAddr5b").await;
-        let p1 = Payment::new(a.id, "dup-tx".into(), 7, 100, 1);
-        let p2 = Payment::new(b.id, "dup-tx".into(), 7, 100, 2);
+        let p1 = Payment::new(a.id, "dup-tx".into(), 7, 100, 0, 1);
+        let p2 = Payment::new(b.id, "dup-tx".into(), 7, 100, 0, 2);
         insert(&db, &p1).await.unwrap();
         let err = insert(&db, &p2).await.unwrap_err();
         assert!(format!("{}", err).to_lowercase().contains("unique"));
@@ -233,7 +255,7 @@ mod tests {
     async fn update_confirmations_advances_count_and_seals_confirmed_at() {
         let db = Db::open_memory().await.unwrap();
         let inv = seed_invoice(&db, "PAddr6").await;
-        let p = Payment::new(inv.id, "tx-conf".into(), 0, 500_000, 1_700_000_100);
+        let p = Payment::new(inv.id, "tx-conf".into(), 0, 500_000, 0, 1_700_000_100);
         insert(&db, &p).await.unwrap();
 
         update_confirmations(&db, p.id, 1, Some(1_700_000_200))
@@ -262,7 +284,7 @@ mod tests {
         let inv = seed_invoice(&db, "PAddr7").await;
         insert(
             &db,
-            &Payment::new(inv.id, "tx-c".into(), 0, 100, 1_700_000_100),
+            &Payment::new(inv.id, "tx-c".into(), 0, 100, 0, 1_700_000_100),
         )
         .await
         .unwrap();

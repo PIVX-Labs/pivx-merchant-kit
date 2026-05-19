@@ -8,19 +8,18 @@
 //!   - **Overpayment**: invoice received more than `amount_due`. The
 //!     excess goes back, again minus the refund-tx fee.
 //!
-//! This stage handles **detection + persistence + visibility**. The actual
-//! tx construction / broadcast is gated on wallet-kit gaining a way to
-//! sign transactions with an HD-indexed key (today the builder only signs
-//! with the wallet's default transparent key). When that lands, the
-//! refund worker layer slots in on top of the queue this stage owns —
-//! same wire format, same DB rows, no API changes for the merchant.
+//! Flow: the matcher / sweeper hooks call into this module to enqueue a
+//! refund row whenever they detect a refundable transition. The
+//! [`worker`] then picks pending rows up on a 30s tick, builds + signs
+//! the refund tx (transparent via wallet-kit's
+//! `create_raw_transparent_transaction_from_utxos`, shield via
+//! `create_shield_transaction`), broadcasts via the configured PIVX
+//! RPC, and marks the row `broadcast` with the on-chain txid.
 //!
-//! Until then: operators with `refunds.enabled = true` get a full record
-//! of what's owed and to which address, exposed via `GET /v1/refunds`,
-//! and can broadcast manually using `pivx-agent-kit` or any other PIVX
-//! wallet. Setting `refunds.enabled = false` (the default) opts out
-//! entirely — overpayments become donations, partial-expired invoices
-//! keep their funds with the merchant.
+//! Setting `refunds.enabled = false` (the default) opts out entirely —
+//! overpayments become donations, partial-expired invoices keep their
+//! funds with the merchant. When enabled, every invoice must include
+//! `refund_address` (the API rejects creates that don't).
 
 pub mod queue;
 pub mod worker;
@@ -222,7 +221,7 @@ mod tests {
         };
         invoices::insert(db, &invoice).await.unwrap();
         if paid > 0 {
-            let mut p = Payment::new(invoice.id, format!("tx-{}", invoice.id), 0, paid, 1);
+            let mut p = Payment::new(invoice.id, format!("tx-{}", invoice.id), 0, paid, 0, 1);
             p.confirmations = confirmations;
             payments::insert(db, &p).await.unwrap();
         }

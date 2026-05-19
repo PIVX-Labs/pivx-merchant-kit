@@ -129,7 +129,7 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr1", 1000, InvoiceStatus::Pending, 100);
         invoices::insert(&db, &inv).await.unwrap();
-        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 400, 1))
+        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 400, 0, 1))
             .await
             .unwrap();
 
@@ -148,7 +148,7 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr2", 1000, InvoiceStatus::Pending, 100);
         invoices::insert(&db, &inv).await.unwrap();
-        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 1000, 1))
+        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 1000, 0, 1))
             .await
             .unwrap();
 
@@ -168,10 +168,10 @@ mod tests {
         let inv = invoice("Addr3", 1000, InvoiceStatus::PartiallyPaid, 100);
         invoices::insert(&db, &inv).await.unwrap();
         // First partial payment was earlier, now a topup arrives.
-        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 400, 1))
+        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 400, 0, 1))
             .await
             .unwrap();
-        payments::insert(&db, &Payment::new(inv.id, "tx2".into(), 0, 600, 2))
+        payments::insert(&db, &Payment::new(inv.id, "tx2".into(), 0, 600, 0, 2))
             .await
             .unwrap();
 
@@ -190,7 +190,7 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr4", 1000, InvoiceStatus::Pending, 5_000_000);
         invoices::insert(&db, &inv).await.unwrap();
-        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 400, 1))
+        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 400, 0, 1))
             .await
             .unwrap();
 
@@ -213,10 +213,10 @@ mod tests {
         let db = Db::open_memory().await.unwrap();
         let inv = invoice("Addr5", 1000, InvoiceStatus::Confirming, 100);
         invoices::insert(&db, &inv).await.unwrap();
-        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 1000, 1))
+        payments::insert(&db, &Payment::new(inv.id, "tx1".into(), 0, 1000, 0, 1))
             .await
             .unwrap();
-        payments::insert(&db, &Payment::new(inv.id, "tx2".into(), 0, 500, 2))
+        payments::insert(&db, &Payment::new(inv.id, "tx2".into(), 0, 500, 0, 2))
             .await
             .unwrap();
 
