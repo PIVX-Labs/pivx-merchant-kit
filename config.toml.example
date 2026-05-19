@@ -26,6 +26,10 @@ poll_interval_secs = 30
 [payments]
 # Which channels the API will accept invoice creation for.
 # "transparent" | "shield" | "both"
+#
+# "shield" or "both" triggers a ~50MB Sapling params download on first
+# daemon start (cached at `data_dir/params/` afterwards). Transparent-
+# only deployments skip the download entirely.
 accept = "both"
 
 # Confirmations required before the webhook fires.
@@ -69,7 +73,11 @@ auth_token = "REPLACE_ME"
 
 [webhooks]
 # Where to POST events. The daemon retries with exponential backoff
-# if delivery fails.
+# if delivery fails. If you'd rather poll the API yourself instead of
+# receiving webhooks, you can still set this to a placeholder URL —
+# but events will accumulate in the dead-letter table after
+# max_attempts. Polling-only deployments are better served by future
+# v0.2.0 support for `webhooks = false`.
 url = "https://your-backend.example.com/pivx-webhook"
 
 # HMAC-SHA256 secret for signing bodies. The daemon adds the digest
